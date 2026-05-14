@@ -11,6 +11,7 @@ import { composeEmailReplyBody, type EmailReplyQuote } from "./email/reply-compo
 import {
 	appendInbound as appendInboundEvent,
 	appendOutbound as appendOutboundEvent,
+	findByThreadKey,
 	summarizeThread,
 } from "./email/thread-store.js";
 import type { ChannelInfo, MomContext, MomEvent, MomHandler, PlatformAdapter, UserInfo } from "./types.js";
@@ -25,6 +26,8 @@ import type { ChannelInfo, MomContext, MomEvent, MomHandler, PlatformAdapter, Us
  */
 interface EmailPayload {
 	from: string;
+	/** Full From header (display name + address) when upstream supplied it. */
+	fromFull?: string;
 	to: string;
 	subject: string;
 	body: string;
@@ -187,6 +190,7 @@ Keep responses concise and professional. The user will receive one email with yo
 				from: payload.from,
 				to: payload.to,
 				subject: payload.subject,
+				body: payload.body,
 				messageId: payload.messageId,
 				inReplyTo: payload.inReplyTo,
 				references: payload.references,
@@ -212,7 +216,10 @@ Keep responses concise and professional. The user will receive one email with yo
 		// Store payload for createContext to read (threading metadata)
 		this.pendingPayloads.set(channelId, payload);
 
-		// Log the inbound message
+		// Log the inbound message. Persist the *raw* inbound body, not the
+		// decorated agent-facing text (which includes Subject:/Thread:/
+		// Attachments preambles). Those decorations are for the agent only and
+		// must never appear in quoted-reply bodies.
 		this.logToFile({
 			date: new Date().toISOString(),
 			ts,
@@ -220,7 +227,7 @@ Keep responses concise and professional. The user will receive one email with yo
 			channelId,
 			user: payload.from,
 			userName: payload.from.split("@")[0],
-			text: event.text,
+			text: payload.body,
 			attachments: [],
 			isBot: false,
 		});
@@ -308,7 +315,11 @@ Keep responses concise and professional. The user will receive one email with yo
 	}
 
 	private stripEmailLogDecorations(text: string): string {
+		// Strip agent-facing preambles that may have ended up in log.jsonl.
+		// Subject:, Thread:, and the trailing Attachments block are all
+		// presentation — they must never leak into a quoted reply body.
 		let cleaned = text.replace(/^Subject:\s*.+?(?:\n\n|$)/, "");
+		cleaned = cleaned.replace(/^Thread:\s*\S+(?:\n\n|$)/, "");
 		const attachmentsIndex = cleaned.indexOf("\n\nAttachments saved to disk:\n");
 		if (attachmentsIndex !== -1) {
 			cleaned = cleaned.slice(0, attachmentsIndex);
@@ -412,12 +423,77 @@ Keep responses concise and professional. The user will receive one email with yo
 		return threadBody;
 	}
 
+	/**
+	 * Rebuild a quote chain by folding the durable thread-events store. The
+	 * store records raw bodies per turn, so this path is decoration-free by
+	 * construction — no presentation strings to filter, no chance of leaking
+	 * agent-facing headers like `Thread:` into a quoted reply.
+	 *
+	 * Returns undefined if the store has no body-bearing events for this
+	 * thread, in which case the caller falls back to the log.jsonl walk.
+	 */
+	private buildQuoteFromStore(threadKey: string | undefined, payload: EmailPayload): string | undefined {
+		if (!threadKey) return undefined;
+		const events = findByThreadKey(this.workingDir, threadKey);
+		if (events.length === 0) return undefined;
+
+		// Order is append order (read top-to-bottom from JSONL). Take only
+		// events with a body — older events written before Fix 2 have no body.
+		const turns = events
+			.filter((e) => typeof e.body === "string" && e.body.trim().length > 0)
+			.map((e) => ({
+				body: (e.body || "").trim(),
+				from: e.type === "outbound" ? (e.to[0] || "agent") : (e.from || payload.from),
+				sentAt: e.at,
+			}));
+
+		// Append the current inbound as the latest turn (this event isn't yet
+		// reflected in the store from the active run's perspective — see
+		// processEmail; the store-write happens before createContext but
+		// composeEmailReplyBody is called later).
+		const currentBody = (payload.replyQuote?.body || payload.body || "").trim();
+		if (currentBody && !turns.some((t) => t.body === currentBody)) {
+			turns.push({
+				body: currentBody,
+				// Prefer the full From header (display name + addr) when present.
+				from: payload.fromFull || payload.from,
+				sentAt: new Date().toISOString(),
+			});
+		}
+
+		if (turns.length === 0) return undefined;
+		if (turns.length === 1) return turns[0].body;
+
+		// Fold oldest→newest: the previous turn becomes the quote attached to
+		// the next turn, then the running chain becomes the quote for the one
+		// after that, and so on.
+		let chain = turns[0].body;
+		for (let i = 1; i < turns.length; i++) {
+			chain = composeEmailReplyBody(turns[i].body, {
+				body: chain,
+				from: turns[i - 1].from,
+				sentAt: turns[i - 1].sentAt,
+			});
+		}
+		return chain;
+	}
+
 	private buildReplyQuote(channelId: string, payload: EmailPayload, currentTs: string, fallbackSentAt?: string): EmailReplyQuote | undefined {
-		const body = this.buildConversationReplyBody(channelId, payload, currentTs) || payload.replyQuote?.body || payload.body;
+		// Prefer the durable store (decoration-free); fall back to the
+		// log.jsonl walk for threads that predate Fix 2.
+		const threadKey = this.activeThreadKeys.get(channelId);
+		const body =
+			this.buildQuoteFromStore(threadKey, payload) ||
+			this.buildConversationReplyBody(channelId, payload, currentTs) ||
+			payload.replyQuote?.body ||
+			payload.body;
 		if (!body?.trim()) return undefined;
+		// Prefer the explicit replyQuote.from from upstream, then the full From
+		// header (which preserves display name), then the bare address.
+		const displayFrom = payload.replyQuote?.from || payload.fromFull || payload.from;
 		return {
 			body,
-			from: payload.replyQuote?.from || payload.from,
+			from: displayFrom,
 			sentAt: payload.replyQuote?.sentAt || fallbackSentAt,
 		};
 	}
@@ -536,6 +612,7 @@ Keep responses concise and professional. The user will receive one email with yo
 				threadKey,
 				to: [toAddress],
 				subject: resolvedSubject,
+				body: text,
 				providerMessageId: result.messageId,
 				rfcMessageId: result.messageId,
 				inReplyTo: replyContext?.messageId,
@@ -637,6 +714,7 @@ Keep responses concise and professional. The user will receive one email with yo
 				threadKey: thread.id,
 				to: recipients,
 				subject,
+				body: request.text,
 				providerMessageId: result.messageId,
 				rfcMessageId: result.messageId,
 				inReplyTo,
@@ -1020,6 +1098,7 @@ Keep responses concise and professional. The user will receive one email with yo
 							threadKey,
 							to: toList.split(",").map((a) => a.trim()).filter(Boolean),
 							subject: replySubject,
+							body: finalText,
 							providerMessageId: result.messageId,
 							rfcMessageId: result.messageId,
 							inReplyTo: meta.messageId,

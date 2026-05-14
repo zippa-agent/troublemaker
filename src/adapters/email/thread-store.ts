@@ -27,6 +27,7 @@ export interface InboundEmailInput {
 	from: string;
 	to?: string;
 	subject?: string;
+	body?: string;
 	messageId?: string;
 	inReplyTo?: string;
 	references?: string;
@@ -41,6 +42,7 @@ export interface OutboundEmailInput {
 	to: string[];
 	cc?: string[];
 	subject?: string;
+	body?: string;
 	providerMessageId?: string;
 	rfcMessageId?: string;
 	inReplyTo?: string;
@@ -59,6 +61,8 @@ export interface EmailEventRecord {
 	selfEmail?: string;
 	subject: string;
 	normalizedSubject: string;
+	/** Raw message body, decorations-free. Used to reconstruct quote chains. */
+	body?: string;
 	messageId?: string;
 	rfcMessageId?: string;
 	providerMessageId?: string;
@@ -140,6 +144,7 @@ export function appendInbound(workingDir: string, input: InboundEmailInput): Ema
 		selfEmail: input.to ? input.to.toLowerCase() : undefined,
 		subject,
 		normalizedSubject,
+		body: input.body,
 		messageId,
 		rfcMessageId: messageId || undefined,
 		inReplyTo: inReplyTo || undefined,
@@ -165,6 +170,7 @@ export function appendOutbound(workingDir: string, input: OutboundEmailInput): E
 		cc: input.cc ?? [],
 		subject,
 		normalizedSubject: normalizeSubject(subject),
+		body: input.body,
 		messageId: rfcMessageId || undefined,
 		rfcMessageId: rfcMessageId || undefined,
 		providerMessageId: input.providerMessageId,
