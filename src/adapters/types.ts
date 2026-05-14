@@ -1,4 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "http";
+import type { SendMessageRequest, SendMessageResult } from "../messaging/send-message.js";
+import type { ThreadRef } from "../messaging/targets.js";
 import type { Attachment, ChannelStore } from "../store.js";
 
 // ============================================================================
@@ -134,6 +136,24 @@ export interface PlatformAdapter {
 	deleteMessage(channel: string, ts: string): Promise<void>;
 	postInThread(channel: string, threadTs: string, text: string): Promise<string>;
 	uploadFile(channel: string, filePath: string, title?: string): Promise<void>;
+
+	// -- send_message routing (optional; adapter that owns the target implements) --
+
+	/**
+	 * Execute a fully-validated SendMessageRequest. Adapters that don't implement
+	 * this fall through to the default route in createSendMessageTool, which calls
+	 * postMessage / postInThread directly. The email adapter must implement this
+	 * to handle ThreadRef resolution + reply-all.
+	 */
+	sendMessage?(request: SendMessageRequest): Promise<SendMessageResult>;
+
+	/**
+	 * Return the agent-visible ThreadRef for an inbound MomEvent on this adapter,
+	 * if the adapter exposes a real thread/reply primitive. Email + Slack always
+	 * return a ref; Telegram returns one keyed off message_id; phone returns its
+	 * channel ref. Adapters that don't override return undefined.
+	 */
+	getThreadRef?(event: MomEvent): ThreadRef | undefined;
 
 	// -- Logging --
 

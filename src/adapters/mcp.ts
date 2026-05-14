@@ -19,7 +19,16 @@ import * as log from "../log.js";
 import { appendAwarenessLine } from "../awareness.js";
 import type { ChannelStore } from "../store.js";
 import { collectChannelsFromLog, formatChannelTable } from "../tools/list-channels.js";
-import { resolveAdapter } from "../tools/send-message-to-channel.js";
+import { recentThreads } from "./email/thread-store.js";
+import type { SendMessageRequest } from "../messaging/send-message.js";
+import { SendMessageValidationError, validateSendMessage } from "../messaging/send-message.js";
+import {
+	adapterForChannelId,
+	decodeThreadRef,
+	encodeThreadRef,
+	type EmailThreadRef,
+	type ThreadRef,
+} from "../messaging/targets.js";
 import type {
 	ChannelInfo,
 	MomContext,
@@ -306,88 +315,142 @@ export class McpAdapter implements PlatformAdapter {
 			},
 		);
 
-		// ── send_message_to_channel ──────────────────────────────────────
-		// Lets the MCP client send a message on any of the agent's connected
-		// channels (Telegram, Slack, Email, Discord) using the agent's bot
-		// credentials. Appears in the agent's awareness stream as a system
-		// notification but does NOT trigger a runner wake.
+		// ── send_message ─────────────────────────────────────────────────
+		// Explicit, validated send. Exactly one of `to` or `thread` must be
+		// provided. `replyAll` is email-only and requires `thread`. Surfaces
+		// resolved recipients + provider id in the result so the audit trail
+		// is explicit. Appears in the agent's awareness stream but does NOT
+		// trigger a runner wake.
 		server.registerTool(
-			"send_message_to_channel",
+			"send_message",
 			{
 				description:
-					"Send a message on the agent's behalf to one of its connected channels " +
-					"(Telegram, Slack, Email, Discord). Channel ID determines routing: numeric → Telegram, " +
-					"C/D/G prefix → Slack, email-{address} → Email. The send appears in the agent's " +
-					"awareness stream but does NOT trigger a run. Use list_channels to discover valid IDs.",
+					"Send a message on the agent's behalf. Exactly one of `to` or `thread` must be provided. " +
+					"`to` is a channel id (numeric Telegram, C/D/G Slack, email-{addr}, phone-{hash}) or an email address. " +
+					"`thread` is an opaque ThreadRef (see list_threads). `replyAll` is email-only and requires `thread`.",
 				inputSchema: {
-					channel: z.string().describe("Channel ID (numeric for Telegram, C/D/G-prefixed for Slack, email-{addr} for Email)"),
-					text: z.string().describe("Message text to send"),
+					to: z.string().optional().describe("Channel id or email address (fresh send)"),
+					thread: z.string().optional().describe("Opaque ThreadRef for replying (see list_threads)"),
+					replyAll: z.boolean().optional().describe("Email-only. Requires thread."),
 					subject: z.string().optional().describe("Subject line (email only)"),
+					text: z.string().describe("Message body"),
 					attachments: z.array(z.string()).optional().describe("Absolute file paths to attach (email only)"),
 				},
 			},
-			async ({ channel, text, subject, attachments }: { channel: string; text: string; subject?: string; attachments?: string[] }) => {
-				log.logInfo(`[mcp] send_message_to_channel: ${channel} (${text.length} chars)`);
+			async ({ to, thread, replyAll, subject, text, attachments }: { to?: string; thread?: string; replyAll?: boolean; subject?: string; text: string; attachments?: string[] }) => {
+				log.logInfo(`[mcp] send_message: to=${to ?? ""} thread=${thread ?? ""} (${text.length} chars)`);
 
-				const adapter = resolveAdapter(channel, this.peerAdapters);
-				if (!adapter) {
-					return {
-						content: [{ type: "text" as const, text: `No adapter found for channel "${channel}". Valid patterns: numeric (Telegram), C/D/G prefix (Slack), email-{address} (Email).` }],
-						isError: true,
-					};
+				let threadRef: ThreadRef | undefined;
+				if (thread) {
+					threadRef = decodeThreadRef(thread);
+					if (!threadRef) {
+						return { content: [{ type: "text" as const, text: `send_message: unable to decode thread ref "${thread}"` }], isError: true };
+					}
+				}
+				let parsedTo: SendMessageRequest["to"];
+				if (to) {
+					if (to.includes("@") && !to.startsWith("email-")) {
+						parsedTo = { kind: "contact", adapter: "email", address: to.toLowerCase() };
+					} else {
+						parsedTo = { kind: "channel", id: to };
+					}
+				}
+
+				let request: SendMessageRequest;
+				try {
+					request = validateSendMessage({
+						to: parsedTo,
+						thread: threadRef,
+						replyAll,
+						subject,
+						text,
+						attachments: attachments?.map((p) => ({ filePath: p, filename: basename(p) })),
+					});
+				} catch (err) {
+					const msg = err instanceof SendMessageValidationError ? err.message : String(err);
+					return { content: [{ type: "text" as const, text: msg }], isError: true };
+				}
+
+				const adapterName = threadRef ? threadRef.adapter
+					: parsedTo && !Array.isArray(parsedTo) && parsedTo.kind === "channel" ? adapterForChannelId(parsedTo.id)
+						: parsedTo && !Array.isArray(parsedTo) && parsedTo.kind === "contact" ? parsedTo.adapter
+							: undefined;
+
+				const adapter = adapterName ? this.peerAdapters.find((a) => a.name === adapterName) : undefined;
+				if (!adapter || !adapter.sendMessage) {
+					return { content: [{ type: "text" as const, text: `send_message: no adapter available for ${adapterName ?? "<unknown>"}` }], isError: true };
 				}
 
 				try {
-					const attachmentObjects = attachments?.map((filePath) => ({
-						filePath,
-						filename: basename(filePath),
-					}));
-
-					const ts = await adapter.postMessage(channel, text, attachmentObjects, subject);
-					adapter.logBotResponse(channel, text, ts);
-
-					// Append to awareness so the agent sees it on its next run.
-					// Does not enqueue a MomEvent — no runner wake.
+					const result = await adapter.sendMessage(request);
 					if (this.awarenessDir) {
 						const preview = text.length > 200 ? `${text.slice(0, 200)}…` : text;
 						appendAwarenessLine(
 							this.awarenessDir,
-							`[mcp] sent to ${adapter.name}:${channel}: ${preview}`,
+							`[mcp] sent via ${result.adapter} to ${result.resolvedRecipients.join(",")}: ${preview}`,
 						);
 					}
-
 					this.logToFile({
 						date: new Date().toISOString(),
 						channel: "mcp",
 						type: "tool_call",
-						tool: "send_message_to_channel",
-						target_adapter: adapter.name,
-						target_channel: channel,
+						tool: "send_message",
+						target_adapter: result.adapter,
+						resolved_recipients: result.resolvedRecipients,
+						thread_ref: result.threadRef,
+						provider_message_id: result.providerMessageId,
 						success: true,
 					});
-
-					const attInfo = attachmentObjects?.length ? ` with ${attachmentObjects.length} attachment(s)` : "";
-					return {
-						content: [{ type: "text" as const, text: `Sent to ${adapter.name}:${channel}${attInfo} (ts=${ts})` }],
-					};
+					const summary = [
+						`Sent via ${result.adapter}`,
+						`recipients: ${result.resolvedRecipients.join(", ")}`,
+						result.resolvedSubject ? `subject: ${result.resolvedSubject}` : "",
+						result.threadRef ? `thread: ${result.threadRef}` : "",
+						`provider id: ${result.providerMessageId}`,
+					].filter(Boolean).join("\n");
+					return { content: [{ type: "text" as const, text: summary }] };
 				} catch (err) {
 					const errMsg = err instanceof Error ? err.message : String(err);
-					log.logWarning(`[mcp] send_message_to_channel failed for ${adapter.name}:${channel}`, errMsg);
+					log.logWarning(`[mcp] send_message failed`, errMsg);
 					this.logToFile({
 						date: new Date().toISOString(),
 						channel: "mcp",
 						type: "tool_call",
-						tool: "send_message_to_channel",
-						target_adapter: adapter.name,
-						target_channel: channel,
+						tool: "send_message",
 						success: false,
 						error: errMsg,
 					});
-					return {
-						content: [{ type: "text" as const, text: `Failed to send: ${errMsg}` }],
-						isError: true,
-					};
+					return { content: [{ type: "text" as const, text: `send_message failed: ${errMsg}` }], isError: true };
 				}
+			},
+		);
+
+		// ── list_threads ─────────────────────────────────────────────────
+		server.registerTool(
+			"list_threads",
+			{
+				description:
+					"List recent email threads with their ThreadRef. Use the returned ThreadRef as the `thread` arg to send_message.",
+				inputSchema: {
+					limit: z.number().optional().describe("Max threads to return. Default 20."),
+				},
+			},
+			async ({ limit }: { limit?: number }) => {
+				const threads = recentThreads(this.workingDir, limit ?? 20);
+				if (threads.length === 0) {
+					return { content: [{ type: "text" as const, text: "No threads yet." }] };
+				}
+				const lines = [
+					"| ThreadRef | Subject | Participants | Updated |",
+					"|-----------|---------|--------------|---------|",
+				];
+				for (const t of threads) {
+					const ref: EmailThreadRef = { kind: "thread", adapter: "email", id: t.threadKey };
+					const subj = (t.subject || "(no subject)").replace(/\|/g, "\\|");
+					const parts = t.participants.slice(0, 3).join(", ") + (t.participants.length > 3 ? "…" : "");
+					lines.push(`| \`${encodeThreadRef(ref)}\` | ${subj} | ${parts} | ${t.updatedAt} |`);
+				}
+				return { content: [{ type: "text" as const, text: lines.join("\n") }] };
 			},
 		);
 
@@ -403,7 +466,7 @@ export class McpAdapter implements PlatformAdapter {
 					"log.jsonl so it covers Telegram, Slack, Email, Discord, etc. and survives " +
 					"container restarts. Returns a markdown table of adapter, channel ID, name, " +
 					"and last-seen timestamp. Use the channel IDs returned here as input to " +
-					"send_message_to_channel.",
+					"send_message (`to` argument).",
 				inputSchema: {},
 			},
 			async () => {

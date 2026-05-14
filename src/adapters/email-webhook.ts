@@ -2,8 +2,17 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import type { IncomingMessage, ServerResponse } from "http";
 import { basename, join } from "path";
 import * as log from "../log.js";
+import type { SendMessageRequest, SendMessageResult } from "../messaging/send-message.js";
+import { SendMessageValidationError } from "../messaging/send-message.js";
+import type { EmailThreadRef, ThreadRef } from "../messaging/targets.js";
+import { encodeThreadRef } from "../messaging/targets.js";
 import type { ChannelStore } from "../store.js";
 import { composeEmailReplyBody, type EmailReplyQuote } from "./email/reply-composer.js";
+import {
+	appendInbound as appendInboundEvent,
+	appendOutbound as appendOutboundEvent,
+	summarizeThread,
+} from "./email/thread-store.js";
 import type { ChannelInfo, MomContext, MomEvent, MomHandler, PlatformAdapter, UserInfo } from "./types.js";
 
 // ============================================================================
@@ -52,6 +61,7 @@ interface ActiveEmailReplyContext {
 	messageId?: string;
 	references?: string;
 	replyQuote?: EmailReplyQuote;
+	threadKey?: string;
 }
 
 interface LoggedEmailThreadEntry {
@@ -83,8 +93,10 @@ Keep responses concise and professional. The user will receive one email with yo
 	private handler!: MomHandler;
 	/** Per-channel email metadata for threading (set in processEmail, read in createContext) */
 	private pendingPayloads = new Map<string, EmailPayload>();
-	/** Active reply contexts used by send_message_to_channel to preserve email threading */
+	/** Active reply contexts used by send_message to preserve in-run reply quote text */
 	private activeReplyContexts = new Map<string, ActiveEmailReplyContext>();
+	/** Per-channel active inbound thread key (set in processEmail, read by getThreadRef) */
+	private activeThreadKeys = new Map<string, string>();
 
 	constructor(config: EmailWebhookAdapterConfig) {
 		this.workingDir = config.workingDir;
@@ -168,12 +180,33 @@ Keep responses concise and professional. The user will receive one email with yo
 		// Save attachments to disk so the agent can read them
 		const savedPaths = this.saveAttachments(payload, channelId);
 
+		// Persist inbound metadata durably (survives container restart)
+		let inboundThreadKey: string | undefined;
+		try {
+			const rec = appendInboundEvent(this.workingDir, {
+				from: payload.from,
+				to: payload.to,
+				subject: payload.subject,
+				messageId: payload.messageId,
+				inReplyTo: payload.inReplyTo,
+				references: payload.references,
+				allRecipients: payload.allRecipients,
+				emailChannel: payload.emailChannel,
+				channelId,
+				receivedAt: new Date(Number(ts)).toISOString(),
+			});
+			inboundThreadKey = rec.threadKey;
+			this.activeThreadKeys.set(channelId, rec.threadKey);
+		} catch (err) {
+			log.logWarning("[email] thread-store appendInbound failed", err instanceof Error ? err.message : String(err));
+		}
+
 		const event: MomEvent = {
 			type: "dm",
 			channel: channelId,
 			ts,
 			user: payload.from,
-			text: this.buildMessageText(payload, savedPaths),
+			text: this.buildMessageText(payload, savedPaths, inboundThreadKey),
 		};
 
 		// Store payload for createContext to read (threading metadata)
@@ -202,14 +235,20 @@ Keep responses concise and professional. The user will receive one email with yo
 			await this.handler.handleEvent(event, this);
 		} finally {
 			this.pendingPayloads.delete(channelId);
+			this.activeThreadKeys.delete(channelId);
 		}
 	}
 
-	private buildMessageText(payload: EmailPayload, savedPaths: Map<string, string>): string {
+	private buildMessageText(payload: EmailPayload, savedPaths: Map<string, string>, threadKey?: string): string {
 		const parts: string[] = [];
 
 		if (payload.subject) {
 			parts.push(`Subject: ${payload.subject}`);
+		}
+
+		if (threadKey) {
+			const threadRef: EmailThreadRef = { kind: "thread", adapter: "email", id: threadKey };
+			parts.push(`Thread: ${encodeThreadRef(threadRef)}`);
 		}
 
 		parts.push(payload.body);
@@ -395,6 +434,7 @@ Keep responses concise and professional. The user will receive one email with yo
 			messageId: payload.messageId,
 			references: payload.references,
 			replyQuote: this.buildReplyQuote(channelId, payload, currentTs, fallbackSentAt),
+			threadKey: this.activeThreadKeys.get(channelId),
 		};
 		this.activeReplyContexts.set(channelId, context);
 		this.activeReplyContexts.set(canonicalChannel, context);
@@ -488,6 +528,24 @@ Keep responses concise and professional. The user will receive one email with yo
 
 		const result = (await response.json()) as { ok: boolean; messageId?: string };
 		log.logInfo(`[email] Outbound sent: messageId=${result.messageId}`);
+
+		// Persist outbound to thread-events log
+		const threadKey = replyContext?.threadKey ?? this.activeThreadKeys.get(channel) ?? toAddress;
+		try {
+			appendOutboundEvent(this.workingDir, {
+				threadKey,
+				to: [toAddress],
+				subject: resolvedSubject,
+				providerMessageId: result.messageId,
+				rfcMessageId: result.messageId,
+				inReplyTo: replyContext?.messageId,
+				references: replyContext?.references ? replyContext.references.split(/\s+/) : [],
+				channelId: channel,
+			});
+		} catch (err) {
+			log.logWarning("[email] thread-store appendOutbound failed", err instanceof Error ? err.message : String(err));
+		}
+
 		return result.messageId || String(Date.now());
 	}
 
@@ -502,6 +560,162 @@ Keep responses concise and professional. The user will receive one email with yo
 	async postInThread(_channel: string, _threadTs: string, _text: string): Promise<string> {
 		// No-op — thread messages go to tool log
 		return String(Date.now());
+	}
+
+	// ==========================================================================
+	// send_message contract: ThreadRef-aware sends + reply-all
+	// ==========================================================================
+
+	getThreadRef(event: MomEvent): ThreadRef | undefined {
+		const key = this.activeThreadKeys.get(event.channel);
+		if (!key) return undefined;
+		return { kind: "thread", adapter: "email", id: key };
+	}
+
+	async sendMessage(request: SendMessageRequest): Promise<SendMessageResult> {
+		if (request.thread) {
+			if (request.thread.adapter !== "email") {
+				throw new SendMessageValidationError(
+					`EmailAdapter.sendMessage received thread for adapter=${request.thread.adapter}`,
+				);
+			}
+			return this.sendThreadReply(request);
+		}
+		return this.sendFresh(request);
+	}
+
+	private async sendThreadReply(request: SendMessageRequest): Promise<SendMessageResult> {
+		const thread = request.thread as EmailThreadRef;
+		const summary = summarizeThread(this.workingDir, thread.id);
+		if (!summary) {
+			throw new SendMessageValidationError(
+				`send_message: thread not found (ref=${encodeThreadRef(thread)}) — may have been pruned`,
+			);
+		}
+
+		const replyAll = !!request.replyAll;
+		const baseRecipients = summary.participants.slice();
+		// Reply-to-sender: pick the most recent inbound's `from` (which is in
+		// participants list); fall back to the whole participant set if we can't
+		// distinguish. Reply-all: send to everyone except self.
+		let recipients: string[];
+		if (replyAll) {
+			recipients = baseRecipients;
+		} else if (baseRecipients.length > 0) {
+			// Best-effort: use the first non-self participant.
+			recipients = [baseRecipients[0]];
+		} else {
+			throw new SendMessageValidationError("send_message: thread has no resolvable recipients");
+		}
+
+		if (recipients.length === 0) {
+			throw new SendMessageValidationError("send_message: replyAll resolved to zero recipients");
+		}
+
+		const subject = request.subject || (summary.subject.startsWith("Re:") ? summary.subject : `Re: ${summary.subject}`);
+		const inReplyTo = summary.lastOutboundMessageId || summary.lastInboundMessageId;
+		const references = summary.references.slice();
+
+		const replyQuoteRecord = this.activeReplyContexts.get(summary.channelId);
+		const replyQuote = replyQuoteRecord?.replyQuote;
+		const body = replyQuote ? composeEmailReplyBody(request.text, replyQuote) : request.text;
+
+		const emailMetadata: Record<string, unknown> = {
+			to: recipients.join(", "),
+			subject,
+			body,
+		};
+		if (inReplyTo) {
+			emailMetadata.in_reply_to = inReplyTo;
+			emailMetadata.references = references.length > 0 ? references.join(" ") : inReplyTo;
+		}
+
+		const result = await this.postEmail(emailMetadata, request.attachments);
+
+		try {
+			appendOutboundEvent(this.workingDir, {
+				threadKey: thread.id,
+				to: recipients,
+				subject,
+				providerMessageId: result.messageId,
+				rfcMessageId: result.messageId,
+				inReplyTo,
+				references,
+				channelId: summary.channelId,
+			});
+		} catch (err) {
+			log.logWarning("[email] thread-store appendOutbound failed", err instanceof Error ? err.message : String(err));
+		}
+
+		return {
+			adapter: "email",
+			providerMessageId: result.messageId || String(Date.now()),
+			resolvedRecipients: recipients,
+			resolvedSubject: subject,
+			threadRef: encodeThreadRef(thread),
+		};
+	}
+
+	private async sendFresh(request: SendMessageRequest): Promise<SendMessageResult> {
+		const recipients = this.recipientsFromTo(request.to);
+		const subject = request.subject || "Message from your agent";
+		const emailMetadata: Record<string, unknown> = {
+			to: recipients.join(", "),
+			subject,
+			body: request.text,
+		};
+		const result = await this.postEmail(emailMetadata, request.attachments);
+		return {
+			adapter: "email",
+			providerMessageId: result.messageId || String(Date.now()),
+			resolvedRecipients: recipients,
+			resolvedSubject: subject,
+		};
+	}
+
+	private recipientsFromTo(to: SendMessageRequest["to"]): string[] {
+		if (!to) throw new SendMessageValidationError("send_message: missing `to`");
+		if (Array.isArray(to)) {
+			return to.map((c) => c.address.toLowerCase());
+		}
+		if (to.kind === "contact") return [to.address.toLowerCase()];
+		if (to.kind === "channel") {
+			const m = to.id.match(/^email-(.+)$/);
+			if (!m) throw new SendMessageValidationError(`send_message: channel id "${to.id}" is not an email channel`);
+			return [m[1].replace(/_/g, ".").toLowerCase()];
+		}
+		throw new SendMessageValidationError("send_message: unsupported `to` shape for email");
+	}
+
+	private async postEmail(
+		metadata: Record<string, unknown>,
+		attachments?: SendMessageRequest["attachments"],
+	): Promise<{ messageId?: string }> {
+		let response: Response;
+		if (attachments && attachments.length > 0) {
+			const form = new FormData();
+			form.append("metadata", JSON.stringify(metadata));
+			for (const att of attachments) {
+				const buffer = readFileSync(att.filePath);
+				form.append("attachments", new Blob([buffer]), att.filename || basename(att.filePath));
+			}
+			response = await fetch(this.sendUrl, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${this.toolsToken}` },
+				body: form,
+			});
+		} else {
+			response = await fetch(this.sendUrl, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.toolsToken}` },
+				body: JSON.stringify(metadata),
+			});
+		}
+		if (!response.ok) {
+			const errorText = await response.text();
+			throw new Error(`Email send failed (${response.status}): ${errorText}`);
+		}
+		return (await response.json()) as { ok: boolean; messageId?: string };
 	}
 
 	async uploadFile(_channel: string, _filePath: string, _title?: string): Promise<void> {
@@ -519,7 +733,7 @@ Keep responses concise and professional. The user will receive one email with yo
 	logBotResponse(channel: string, text: string, ts: string): void {
 		// Normalize channelId to match processEmail's format (FAT-370):
 		//   processEmail: `email-${from.toLowerCase().replace(/[^a-z0-9]/g, "_")}`
-		// Without normalization, bot replies routed via send_message_to_channel
+		// Without normalization, bot replies routed via send_message
 		// arrive here as channel="email-alex@gmail.com" while inbound uses
 		// channelId="email-alex_gmail_com" — and buildConversationReplyBody's
 		// channelId filter never matches across turns.
@@ -796,6 +1010,25 @@ Keep responses concise and professional. The user will receive one email with yo
 				// for this channelId and the agent loses its own context across turns.
 				if (channelId) {
 					this.logBotResponse(channelId, finalText, String(Date.now()));
+				}
+
+				// Persist outbound to thread-events log for durable thread reconstruction.
+				const threadKey = channelId ? this.activeThreadKeys.get(channelId) : undefined;
+				if (threadKey) {
+					try {
+						appendOutboundEvent(this.workingDir, {
+							threadKey,
+							to: toList.split(",").map((a) => a.trim()).filter(Boolean),
+							subject: replySubject,
+							providerMessageId: result.messageId,
+							rfcMessageId: result.messageId,
+							inReplyTo: meta.messageId,
+							references: meta.references ? meta.references.split(/\s+/) : [],
+							channelId: channelId || "",
+						});
+					} catch (err) {
+						log.logWarning("[email] thread-store appendOutbound failed", err instanceof Error ? err.message : String(err));
+					}
 				}
 			}
 		} catch (err) {

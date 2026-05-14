@@ -3,6 +3,9 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { createHash } from "crypto";
 import { join } from "path";
 import * as log from "../log.js";
+import type { SendMessageRequest, SendMessageResult } from "../messaging/send-message.js";
+import { SendMessageValidationError } from "../messaging/send-message.js";
+import type { ThreadRef } from "../messaging/targets.js";
 import type { ChannelStore } from "../store.js";
 import type { ChannelInfo, MomContext, MomEvent, MomHandler, PlatformAdapter, UserInfo } from "./types.js";
 import { createPhoneProviderRegistryFromEnv, type PhoneProviderRegistry } from "./phone-messaging/registry.js";
@@ -173,6 +176,39 @@ You are replying in an SMS/iMessage-style conversation. Keep messages concise, d
 
 	async postInThread(channel: string, _threadTs: string, text: string): Promise<string> {
 		return this.postMessage(channel, text);
+	}
+
+	getThreadRef(event: MomEvent): ThreadRef | undefined {
+		if (!event.channel) return undefined;
+		return { kind: "thread", adapter: "phone", channel: event.channel };
+	}
+
+	async sendMessage(request: SendMessageRequest): Promise<SendMessageResult> {
+		if (request.thread) {
+			if (request.thread.adapter !== "phone") {
+				throw new SendMessageValidationError(`PhoneAdapter received thread for adapter=${request.thread.adapter}`);
+			}
+			const channel = request.thread.channel;
+			const ts = await this.postMessage(channel, request.text);
+			this.logBotResponse(channel, request.text, ts);
+			return {
+				adapter: "phone",
+				providerMessageId: ts,
+				resolvedRecipients: [channel],
+				threadRef: `phone:${channel}`,
+			};
+		}
+		const to = request.to;
+		if (!to) throw new SendMessageValidationError("send_message: missing target");
+		if (Array.isArray(to)) {
+			throw new SendMessageValidationError("send_message: phone does not support multi-target arrays");
+		}
+		if (to.kind !== "channel") {
+			throw new SendMessageValidationError("send_message: phone requires ChannelRef target");
+		}
+		const ts = await this.postMessage(to.id, request.text);
+		this.logBotResponse(to.id, request.text, ts);
+		return { adapter: "phone", providerMessageId: ts, resolvedRecipients: [to.id] };
 	}
 
 	async uploadFile(_channel: string, _filePath: string, _title?: string): Promise<void> {

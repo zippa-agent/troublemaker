@@ -203,7 +203,7 @@ export function createTwoMessageContext(
 				if (!text.trim()) return;
 
 				// messages-only: suppress harness-driven final response entirely.
-				// Agent communicates only via send_message_to_channel.
+				// Agent communicates only via send_message.
 				if (messagesOnly) {
 					pendingText = null;
 					return;

@@ -3,6 +3,9 @@ import TelegramBot from "node-telegram-bot-api";
 import { basename, join } from "path";
 import { MomSettingsManager } from "../context.js";
 import * as log from "../log.js";
+import type { SendMessageRequest, SendMessageResult } from "../messaging/send-message.js";
+import { SendMessageValidationError } from "../messaging/send-message.js";
+import type { ThreadRef } from "../messaging/targets.js";
 import type { Attachment, ChannelStore } from "../store.js";
 import { markdownToTelegramHtml } from "./telegram-format.js";
 import { createTwoMessageContext } from "./context.js";
@@ -268,6 +271,39 @@ When mentioning users, use @username format.`;
 			parse_mode: "HTML",
 		});
 		return String(result.message_id);
+	}
+
+	getThreadRef(event: MomEvent): ThreadRef | undefined {
+		if (!event.channel || !event.ts) return undefined;
+		return { kind: "thread", adapter: "telegram", chat: event.channel, replyToMessageId: event.ts };
+	}
+
+	async sendMessage(request: SendMessageRequest): Promise<SendMessageResult> {
+		if (request.thread) {
+			if (request.thread.adapter !== "telegram") {
+				throw new SendMessageValidationError(`TelegramAdapter received thread for adapter=${request.thread.adapter}`);
+			}
+			const { chat, replyToMessageId } = request.thread;
+			const ts = await this.postInThread(chat, replyToMessageId, request.text);
+			this.logBotResponse(chat, request.text, ts);
+			return {
+				adapter: "telegram",
+				providerMessageId: ts,
+				resolvedRecipients: [chat],
+				threadRef: `telegram:msg:${chat}:${replyToMessageId}`,
+			};
+		}
+		const to = request.to;
+		if (!to) throw new SendMessageValidationError("send_message: missing target");
+		if (Array.isArray(to)) {
+			throw new SendMessageValidationError("send_message: telegram does not support multi-target arrays");
+		}
+		if (to.kind !== "channel") {
+			throw new SendMessageValidationError("send_message: telegram requires ChannelRef target");
+		}
+		const ts = await this.postMessage(to.id, request.text);
+		this.logBotResponse(to.id, request.text, ts);
+		return { adapter: "telegram", providerMessageId: ts, resolvedRecipients: [to.id] };
 	}
 
 	async uploadFile(channel: string, filePath: string, title?: string): Promise<void> {

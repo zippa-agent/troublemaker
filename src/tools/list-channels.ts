@@ -97,7 +97,7 @@ export function createListChannelsTool(workingDir: string): AgentTool<any> {
 			"List every channel the agent has ever sent or received a message on. " +
 			"Reads from log.jsonl, so it covers all adapters (Telegram, Slack, Email, " +
 			"Discord, SMS/iMessage, etc.) and survives container restarts. Use this to discover " +
-			"valid channel IDs for send_message_to_channel.",
+			"valid channel IDs for send_message (`to` argument).",
 		parameters: schema,
 		execute: async () => {
 			const channels = collectChannelsFromLog(workingDir);

@@ -4,6 +4,9 @@ import { basename, join } from "path";
 import { MomSettingsManager } from "../context.js";
 import type { ChannelPulse } from "../engagement/channel-pulse.js";
 import * as log from "../log.js";
+import type { SendMessageRequest, SendMessageResult } from "../messaging/send-message.js";
+import { SendMessageValidationError } from "../messaging/send-message.js";
+import type { ThreadRef } from "../messaging/targets.js";
 import type { Attachment, ChannelStore } from "../store.js";
 import { createTwoMessageContext } from "./context.js";
 import type { ChannelInfo, MomContext, MomEvent, MomHandler, PlatformAdapter, UserInfo } from "./types.js";
@@ -179,6 +182,39 @@ When mentioning users, use <@username> format (e.g., <@mario>).`;
 	async postInThread(channel: string, threadTs: string, text: string): Promise<string> {
 		const result = await this.webClient.chat.postMessage({ channel, thread_ts: threadTs, text: markdownToSlackMrkdwn(text) });
 		return result.ts as string;
+	}
+
+	getThreadRef(event: MomEvent): ThreadRef | undefined {
+		if (!event.channel || !event.ts) return undefined;
+		return { kind: "thread", adapter: "slack", channel: event.channel, threadTs: event.ts };
+	}
+
+	async sendMessage(request: SendMessageRequest): Promise<SendMessageResult> {
+		if (request.thread) {
+			if (request.thread.adapter !== "slack") {
+				throw new SendMessageValidationError(`SlackAdapter received thread for adapter=${request.thread.adapter}`);
+			}
+			const { channel, threadTs } = request.thread;
+			const ts = await this.postInThread(channel, threadTs, request.text);
+			this.logBotResponse(channel, request.text, ts);
+			return {
+				adapter: "slack",
+				providerMessageId: ts,
+				resolvedRecipients: [channel],
+				threadRef: `slack:thread:${channel}:${threadTs}`,
+			};
+		}
+		const to = request.to;
+		if (!to) throw new SendMessageValidationError("send_message: missing target");
+		const channelId =
+			Array.isArray(to)
+				? (() => { throw new SendMessageValidationError("send_message: slack does not support multi-target arrays"); })()
+				: to.kind === "channel"
+					? to.id
+					: (() => { throw new SendMessageValidationError("send_message: slack requires ChannelRef target"); })();
+		const ts = await this.postMessage(channelId, request.text);
+		this.logBotResponse(channelId, request.text, ts);
+		return { adapter: "slack", providerMessageId: ts, resolvedRecipients: [channelId] };
 	}
 
 	async uploadFile(channel: string, filePath: string, title?: string): Promise<void> {
