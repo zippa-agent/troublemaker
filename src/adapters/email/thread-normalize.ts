@@ -106,9 +106,15 @@ export function mergeReferences(existing: string[], add: Array<string | undefine
 
 /**
  * Build the stable thread key used to find an EmailThreadRef. Prefers the
- * earliest known Message-ID in the chain (root of conversation); falls back to a
- * deterministic hash of (normalizedSubject + sorted participants) when no
+ * earliest known Message-ID in the chain (root of conversation); falls back to
+ * a deterministic hash of (normalizedSubject + sorted participants) when no
  * Message-ID is available.
+ *
+ * Every return value is either a canonical Message-ID (localpart@domain, no
+ * brackets, no whitespace) or a `subject:<hash>` fallback. Anything that
+ * doesn't look like a Message-ID is rejected — prevents junk values (JSON
+ * blobs, header detritus, multi-token strings) from being stored as a thread
+ * id and later being echoed back into agent context.
  */
 export function buildThreadKey(input: {
 	references?: string[];
@@ -117,18 +123,33 @@ export function buildThreadKey(input: {
 	subject?: string;
 	participants?: string[];
 }): string {
-	const refs = input.references ?? [];
-	if (refs.length > 0) {
-		return refs[0];
+	for (const ref of input.references ?? []) {
+		const canonical = canonicalMessageId(ref);
+		if (looksLikeMessageId(canonical)) return canonical;
 	}
 	const inReply = canonicalMessageId(input.inReplyTo);
-	if (inReply) return inReply;
+	if (looksLikeMessageId(inReply)) return inReply;
 	const own = canonicalMessageId(input.messageId);
-	if (own) return own;
+	if (looksLikeMessageId(own)) return own;
 	const subj = normalizeSubject(input.subject);
 	const parts = (input.participants ?? []).slice().sort().join(",");
 	const seed = `${subj}|${parts}`;
 	return `subject:${djb2(seed)}`;
+}
+
+/**
+ * A Message-ID looks like `localpart@domain`: exactly one `@`, no whitespace,
+ * no brackets, no commas, no quotes. Rejecting non-conforming strings here
+ * keeps junk (e.g. a JSON-array string serialized into a References field)
+ * out of the thread store.
+ */
+function looksLikeMessageId(s: string): boolean {
+	if (!s) return false;
+	if (/\s|["[\],{}]/.test(s)) return false;
+	const at = s.indexOf("@");
+	if (at <= 0 || at !== s.lastIndexOf("@")) return false;
+	const domain = s.slice(at + 1);
+	return domain.length > 0 && domain.includes(".");
 }
 
 function djb2(s: string): string {
