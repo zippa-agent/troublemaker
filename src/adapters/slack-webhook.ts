@@ -185,6 +185,7 @@ export class SlackWebhookAdapter extends SlackBase {
 			type: "mention",
 			channel: event.channel,
 			ts: event.ts,
+			threadTs: event.thread_ts,
 			user: event.user || event.bot_id || "unknown",
 			text: (event.text || "").replace(/<@[A-Z0-9]+>/gi, "").trim(),
 			files: event.files,
@@ -231,6 +232,7 @@ export class SlackWebhookAdapter extends SlackBase {
 			type: isDM ? "dm" : "mention",
 			channel: event.channel,
 			ts: event.ts,
+			threadTs: event.thread_ts,
 			user: userId,
 			text: (event.text || "").replace(/<@[A-Z0-9]+>/gi, "").trim(),
 			files: event.files,
@@ -287,6 +289,8 @@ interface SlackEventInner {
 	bot_id?: string;
 	text?: string;
 	ts: string;
+	/** Present when the message is a reply inside an existing thread. */
+	thread_ts?: string;
 	subtype?: string;
 	files?: Array<{ name: string; url_private_download?: string; url_private?: string }>;
 }

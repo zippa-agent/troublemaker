@@ -6,6 +6,7 @@ import * as log from "../log.js";
 import type { SendMessageRequest, SendMessageResult } from "../messaging/send-message.js";
 import { SendMessageValidationError } from "../messaging/send-message.js";
 import type { ThreadRef } from "../messaging/targets.js";
+import { encodeThreadRef } from "../messaging/targets.js";
 import type { ChannelStore } from "../store.js";
 import type { ChannelInfo, MomContext, MomEvent, MomHandler, PlatformAdapter, UserInfo } from "./types.js";
 import { createPhoneProviderRegistryFromEnv, type PhoneProviderRegistry } from "./phone-messaging/registry.js";
@@ -285,10 +286,14 @@ You are replying in an SMS/iMessage-style conversation. Keep messages concise, d
 
 	createContext(event: MomEvent, _store: ChannelStore, _isEvent?: boolean): MomContext {
 		let finalText = "";
+		const threadRef = this.getThreadRef(event);
+		const displayText = threadRef
+			? `Thread: ${encodeThreadRef(threadRef)}\n\n${event.text}`
+			: event.text;
 		return {
 			message: {
-				text: event.text,
-				rawText: event.text,
+				text: displayText,
+				rawText: displayText,
 				user: event.user,
 				userName: event.user,
 				channel: event.channel,

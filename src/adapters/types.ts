@@ -20,6 +20,16 @@ export interface MomEvent {
 	files?: Array<{ name?: string; url_private_download?: string; url_private?: string }>;
 	/** Processed attachments with local paths (populated after logging) */
 	attachments?: Attachment[];
+	/**
+	 * Platform-agnostic parent-of-thread reference, populated by adapters when
+	 * the inbound message is itself a reply inside an existing thread.
+	 *   - Slack: event.thread_ts (parent message ts)
+	 *   - Telegram: msg.reply_to_message.message_id
+	 *   - Email/Phone: unset (email uses its own activeThreadKeys path)
+	 * Consumed by getThreadRef so replies route to the parent, not the user's
+	 * own message id.
+	 */
+	threadTs?: string;
 }
 
 export interface ChannelInfo {

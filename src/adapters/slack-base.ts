@@ -7,6 +7,7 @@ import * as log from "../log.js";
 import type { SendMessageRequest, SendMessageResult } from "../messaging/send-message.js";
 import { SendMessageValidationError } from "../messaging/send-message.js";
 import type { ThreadRef } from "../messaging/targets.js";
+import { encodeThreadRef } from "../messaging/targets.js";
 import type { Attachment, ChannelStore } from "../store.js";
 import { createTwoMessageContext } from "./context.js";
 import type { ChannelInfo, MomContext, MomEvent, MomHandler, PlatformAdapter, UserInfo } from "./types.js";
@@ -185,8 +186,13 @@ When mentioning users, use <@username> format (e.g., <@mario>).`;
 	}
 
 	getThreadRef(event: MomEvent): ThreadRef | undefined {
-		if (!event.channel || !event.ts) return undefined;
-		return { kind: "thread", adapter: "slack", channel: event.channel, threadTs: event.ts };
+		if (!event.channel) return undefined;
+		// Prefer event.threadTs (parent of an existing thread) over event.ts (the
+		// user's own message id). Fallback to ts so a top-level mention threads
+		// under itself on reply — keeps today's behavior for fresh conversations.
+		const ts = event.threadTs || event.ts;
+		if (!ts) return undefined;
+		return { kind: "thread", adapter: "slack", channel: event.channel, threadTs: ts };
 	}
 
 	async sendMessage(request: SendMessageRequest): Promise<SendMessageResult> {
@@ -274,6 +280,13 @@ When mentioning users, use <@username> format (e.g., <@mario>).`;
 
 		const headerLine = eventFilename ? `_Starting event: ${eventFilename}_` : "_Thinking_";
 
+		// Surface ThreadRef to the agent: prepend `Thread: <encoded>` so the agent
+		// can pass it back to send_message({ thread, ... }) for in-thread replies.
+		const threadRef = this.getThreadRef(event);
+		const eventWithThread: MomEvent = threadRef
+			? { ...event, text: `Thread: ${encodeThreadRef(threadRef)}\n\n${event.text}` }
+			: event;
+
 		// Track thread messages and working message ID for respondInThread + deleteMessage
 		const threadMessageTs: string[] = [];
 		let workingMessageId: string | null = null;
@@ -289,7 +302,7 @@ When mentioning users, use <@username> format (e.g., <@mario>).`;
 			},
 			{
 				headerLine,
-				event,
+				event: eventWithThread,
 				user,
 				channels: this.getAllChannels(),
 				users: this.getAllUsers(),

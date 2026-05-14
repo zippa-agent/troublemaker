@@ -6,6 +6,7 @@ import * as log from "../log.js";
 import type { SendMessageRequest, SendMessageResult } from "../messaging/send-message.js";
 import { SendMessageValidationError } from "../messaging/send-message.js";
 import type { ThreadRef } from "../messaging/targets.js";
+import { encodeThreadRef } from "../messaging/targets.js";
 import type { Attachment, ChannelStore } from "../store.js";
 import { markdownToTelegramHtml } from "./telegram-format.js";
 import { createTwoMessageContext } from "./context.js";
@@ -131,7 +132,8 @@ When mentioning users, use @username format.`;
 		const momEvent: MomEvent = {
 			type: msg.chat.type === "private" ? "dm" : "mention",
 			channel: chatId,
-			ts: String(msg.date),
+			ts: String(msg.message_id),
+			threadTs: msg.reply_to_message?.message_id ? String(msg.reply_to_message.message_id) : undefined,
 			user: userId,
 			text,
 			attachments,
@@ -141,7 +143,7 @@ When mentioning users, use @username format.`;
 		const chatName = this.channels.get(chatId)?.name || chatId;
 		this.logToFile({
 			date: new Date(msg.date * 1000).toISOString(),
-			ts: String(msg.date),
+			ts: String(msg.message_id),
 			channel: `telegram:${chatName}`,
 			channelId: chatId,
 			user: userId,
@@ -274,8 +276,13 @@ When mentioning users, use @username format.`;
 	}
 
 	getThreadRef(event: MomEvent): ThreadRef | undefined {
-		if (!event.channel || !event.ts) return undefined;
-		return { kind: "thread", adapter: "telegram", chat: event.channel, replyToMessageId: event.ts };
+		if (!event.channel) return undefined;
+		// Prefer event.threadTs (the parent the user was replying to) over event.ts
+		// (the user's own message_id). Fallback to ts so a fresh message gets a
+		// reply-to-self ref — matches Slack's fallback semantics.
+		const replyToMessageId = event.threadTs || event.ts;
+		if (!replyToMessageId) return undefined;
+		return { kind: "thread", adapter: "telegram", chat: event.channel, replyToMessageId };
 	}
 
 	async sendMessage(request: SendMessageRequest): Promise<SendMessageResult> {
@@ -372,6 +379,12 @@ When mentioning users, use @username format.`;
 			? `<i>Starting event: ${escapeHtml(eventFilename)}</i>`
 			: "<i>Thinking</i>";
 
+		// Surface ThreadRef so the agent can pass it back to send_message({ thread, ... }).
+		const threadRef = this.getThreadRef(event);
+		const eventWithThread: MomEvent = threadRef
+			? { ...event, text: `Thread: ${encodeThreadRef(threadRef)}\n\n${event.text}` }
+			: event;
+
 		return createTwoMessageContext(
 			{
 				post: (ch, text) => this.postMessage(ch, text),
@@ -383,7 +396,7 @@ When mentioning users, use @username format.`;
 			},
 			{
 				headerLine,
-				event,
+				event: eventWithThread,
 				user,
 				channels: this.getAllChannels(),
 				users: this.getAllUsers(),
