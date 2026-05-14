@@ -71,8 +71,25 @@ export function normalizeParticipants(values: Array<string | undefined | null> |
 }
 
 /**
+ * A Message-ID looks like `localpart@domain`: exactly one `@`, no whitespace,
+ * no brackets, no commas, no quotes. Rejecting non-conforming strings keeps
+ * junk (e.g. a JSON-array string serialized into a References field) out of
+ * the thread store and the outbound headers we emit.
+ */
+export function looksLikeMessageId(s: string): boolean {
+	if (!s) return false;
+	if (/\s|["[\],{}]/.test(s)) return false;
+	const at = s.indexOf("@");
+	if (at <= 0 || at !== s.lastIndexOf("@")) return false;
+	const domain = s.slice(at + 1);
+	return domain.length > 0 && domain.includes(".");
+}
+
+/**
  * Parse a References header (space-separated Message-IDs in angle brackets) into
- * a canonicalized, deduped list preserving first-occurrence order.
+ * a canonicalized, deduped list preserving first-occurrence order. Tokens that
+ * don't match Message-ID shape (e.g. a JSON-array string accidentally serialized
+ * into the references field) are dropped rather than passed through.
  */
 export function parseReferences(raw: string | undefined | null): string[] {
 	if (!raw) return [];
@@ -81,7 +98,7 @@ export function parseReferences(raw: string | undefined | null): string[] {
 	const tokens = raw.split(/\s+/);
 	for (const tok of tokens) {
 		const id = canonicalMessageId(tok);
-		if (!id || seen.has(id)) continue;
+		if (!looksLikeMessageId(id) || seen.has(id)) continue;
 		seen.add(id);
 		out.push(id);
 	}
@@ -137,20 +154,6 @@ export function buildThreadKey(input: {
 	return `subject:${djb2(seed)}`;
 }
 
-/**
- * A Message-ID looks like `localpart@domain`: exactly one `@`, no whitespace,
- * no brackets, no commas, no quotes. Rejecting non-conforming strings here
- * keeps junk (e.g. a JSON-array string serialized into a References field)
- * out of the thread store.
- */
-function looksLikeMessageId(s: string): boolean {
-	if (!s) return false;
-	if (/\s|["[\],{}]/.test(s)) return false;
-	const at = s.indexOf("@");
-	if (at <= 0 || at !== s.lastIndexOf("@")) return false;
-	const domain = s.slice(at + 1);
-	return domain.length > 0 && domain.includes(".");
-}
 
 function djb2(s: string): string {
 	let h = 5381;

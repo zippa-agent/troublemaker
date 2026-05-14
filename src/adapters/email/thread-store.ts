@@ -47,6 +47,8 @@ export interface OutboundEmailInput {
 	rfcMessageId?: string;
 	inReplyTo?: string;
 	references?: string[];
+	/** Verbatim References header we emitted on the outbound. */
+	rawReferences?: string;
 	channelId: string;
 	sentAt?: string;
 }
@@ -67,7 +69,20 @@ export interface EmailEventRecord {
 	rfcMessageId?: string;
 	providerMessageId?: string;
 	inReplyTo?: string;
+	/**
+	 * Canonical references chain (no brackets, deduped, ordered oldest-first).
+	 * Used for thread keying and summary fold. NOT the value to emit on outbound
+	 * — that's `rawReferences`, which preserves the parent's exact header.
+	 */
 	references: string[];
+	/**
+	 * Verbatim References header value from the parent message (inbound) or the
+	 * value we emitted (outbound). On reply, RFC 5322 §3.6.4 says the next
+	 * message's References = parent's rawReferences + parent's Message-ID
+	 * appended. Storing this verbatim avoids reconstructing the chain from a
+	 * lossy summary union.
+	 */
+	rawReferences?: string;
 	emailChannel?: string | null;
 	at: string;
 }
@@ -149,6 +164,7 @@ export function appendInbound(workingDir: string, input: InboundEmailInput): Ema
 		rfcMessageId: messageId || undefined,
 		inReplyTo: inReplyTo || undefined,
 		references: mergeReferences(references, [inReplyTo, messageId]),
+		rawReferences: input.references,
 		emailChannel: input.emailChannel ?? null,
 		at: input.receivedAt || new Date().toISOString(),
 	};
@@ -176,6 +192,7 @@ export function appendOutbound(workingDir: string, input: OutboundEmailInput): E
 		providerMessageId: input.providerMessageId,
 		inReplyTo: inReplyTo || undefined,
 		references: refs,
+		rawReferences: input.rawReferences,
 		at: input.sentAt || new Date().toISOString(),
 	};
 	append(workingDir, record);

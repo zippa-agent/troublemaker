@@ -12,6 +12,7 @@ import {
 	appendInbound as appendInboundEvent,
 	appendOutbound as appendOutboundEvent,
 	findByThreadKey,
+	type EmailEventRecord,
 	summarizeThread,
 } from "./email/thread-store.js";
 import type { ChannelInfo, MomContext, MomEvent, MomHandler, PlatformAdapter, UserInfo } from "./types.js";
@@ -80,6 +81,14 @@ interface EmailThreadTurn {
 	body: string;
 	from: string;
 	sentAt?: string;
+}
+
+/** Return the last array element matching the predicate, or undefined. */
+function lastOf<T>(arr: T[], pred: (t: T) => boolean): T | undefined {
+	for (let i = arr.length - 1; i >= 0; i--) {
+		if (pred(arr[i])) return arr[i];
+	}
+	return undefined;
 }
 
 export class EmailWebhookAdapter implements PlatformAdapter {
@@ -690,8 +699,22 @@ Keep responses concise and professional. The user will receive one email with yo
 		}
 
 		const subject = request.subject || (summary.subject.startsWith("Re:") ? summary.subject : `Re: ${summary.subject}`);
-		const inReplyTo = summary.lastOutboundMessageId || summary.lastInboundMessageId;
-		const references = summary.references.slice();
+
+		// RFC 5322 §3.6.4: when replying, In-Reply-To = the parent we're
+		// replying to. References = the parent's References header verbatim,
+		// with the parent's Message-ID appended. Build both from the most
+		// recent inbound in the thread, not from a summary union (which loses
+		// chain order and can include unrelated branches).
+		const allEvents = findByThreadKey(this.workingDir, thread.id);
+		const parentInbound = lastOf(allEvents, (e) => e.type === "inbound");
+		const inReplyTo = parentInbound?.messageId;
+		const parentRawReferences = parentInbound?.rawReferences?.trim() || "";
+		const parentMessageId = parentInbound?.messageId
+			? `<${parentInbound.messageId}>`
+			: "";
+		const outboundRawReferences = parentRawReferences
+			? `${parentRawReferences} ${parentMessageId}`.trim()
+			: parentMessageId;
 
 		const replyQuoteRecord = this.activeReplyContexts.get(summary.channelId);
 		const replyQuote = replyQuoteRecord?.replyQuote;
@@ -704,7 +727,9 @@ Keep responses concise and professional. The user will receive one email with yo
 		};
 		if (inReplyTo) {
 			emailMetadata.in_reply_to = inReplyTo;
-			emailMetadata.references = references.length > 0 ? references.join(" ") : inReplyTo;
+			if (outboundRawReferences) {
+				emailMetadata.references = outboundRawReferences;
+			}
 		}
 
 		const result = await this.postEmail(emailMetadata, request.attachments);
@@ -718,7 +743,8 @@ Keep responses concise and professional. The user will receive one email with yo
 				providerMessageId: result.messageId,
 				rfcMessageId: result.messageId,
 				inReplyTo,
-				references,
+				references: summary.references.slice(),
+				rawReferences: outboundRawReferences || undefined,
 				channelId: summary.channelId,
 			});
 		} catch (err) {
