@@ -9,12 +9,14 @@ import { mkdirSync, rmSync } from "fs";
 import {
 	appendInbound,
 	appendOutbound,
+	findByMessageId,
 	findByThreadKey,
 } from "../src/adapters/email/thread-store.js";
 import {
 	looksLikeMessageId,
 	parseReferences,
 } from "../src/adapters/email/thread-normalize.js";
+import { decodeThreadRef, encodeThreadRef } from "../src/messaging/targets.js";
 
 const DIR = `/tmp/refs-construction-test-${Date.now()}`;
 mkdirSync(DIR, { recursive: true });
@@ -94,6 +96,38 @@ falsy(
 	looksLikeMessageId("a@x.com,b@y.com"),
 	"looksLikeMessageId: comma-joined ids",
 );
+falsy(
+	looksLikeMessageId("8f336b12-573f-4dcf-bdd5-0b922d718c16"),
+	"looksLikeMessageId: provider UUID is not an RFC Message-ID",
+);
+falsy(
+	looksLikeMessageId("<missing-at>"),
+	"looksLikeMessageId: bracketed junk without @ is not an RFC Message-ID",
+);
+
+// ───── Parent-bearing EmailThreadRef encoding ─────
+
+const encodedParentRef = encodeThreadRef({
+	kind: "thread",
+	adapter: "email",
+	id: "root@example.com",
+	parentMessageId: "child+reply@example.com",
+});
+eq(
+	encodedParentRef,
+	"email:thread:root@example.com:parent:child%2Breply%40example.com",
+	"encodeThreadRef includes exact email parent Message-ID",
+);
+eq(
+	decodeThreadRef(encodedParentRef),
+	{
+		kind: "thread",
+		adapter: "email",
+		id: "root@example.com",
+		parentMessageId: "child+reply@example.com",
+	},
+	"decodeThreadRef restores exact email parent Message-ID",
+);
 
 // ───── Defect 1+2 fixture: outbound references chain construction ─────
 //
@@ -123,6 +157,27 @@ const out1 = appendOutbound(DIR, {
 	channelId: "email-alex_example_com",
 });
 eq(out1.rawReferences, "<a@example.com>", "outbound 1 captures rawReferences");
+
+const providerOnlyOut = appendOutbound(DIR, {
+	threadKey: inA.threadKey,
+	to: ["alex@example.com"],
+	subject: "Re: Thread root",
+	providerMessageId: "8f336b12-573f-4dcf-bdd5-0b922d718c16",
+	inReplyTo: "<a@example.com>",
+	references: ["a@example.com"],
+	channelId: "email-alex_example_com",
+});
+eq(
+	providerOnlyOut.providerMessageId,
+	"8f336b12-573f-4dcf-bdd5-0b922d718c16",
+	"outbound stores provider UUID separately",
+);
+falsy(providerOnlyOut.messageId, "provider-only outbound does not invent RFC messageId from provider UUID");
+falsy(providerOnlyOut.rfcMessageId, "provider-only outbound does not invent rfcMessageId from provider UUID");
+falsy(
+	findByMessageId(DIR, "8f336b12-573f-4dcf-bdd5-0b922d718c16"),
+	"findByMessageId never resolves provider UUID as RFC Message-ID",
+);
 
 // Inbound B: user replies to our reply. Their References header should include
 // both our reply's ID and the root.

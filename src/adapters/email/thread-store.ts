@@ -8,8 +8,8 @@
  * real workload.
  *
  * Every event references a stable thread key (see thread-normalize.buildThreadKey)
- * which the agent sees as an opaque EmailThreadRef.id (base64url-encoded by
- * targets.encodeThreadRef).
+ * which the agent sees as an opaque EmailThreadRef.id. Email ThreadRefs may
+ * also carry the exact parent inbound Message-ID to reply to.
  */
 
 import { appendFileSync, existsSync, readFileSync } from "fs";
@@ -17,6 +17,7 @@ import { join } from "path";
 import {
 	buildThreadKey,
 	canonicalMessageId,
+	formatReferences,
 	mergeReferences,
 	normalizeParticipants,
 	normalizeSubject,
@@ -164,7 +165,7 @@ export function appendInbound(workingDir: string, input: InboundEmailInput): Ema
 		rfcMessageId: messageId || undefined,
 		inReplyTo: inReplyTo || undefined,
 		references: mergeReferences(references, [inReplyTo, messageId]),
-		rawReferences: input.references,
+		rawReferences: formatReferences(references) || undefined,
 		emailChannel: input.emailChannel ?? null,
 		at: input.receivedAt || new Date().toISOString(),
 	};
@@ -192,7 +193,7 @@ export function appendOutbound(workingDir: string, input: OutboundEmailInput): E
 		providerMessageId: input.providerMessageId,
 		inReplyTo: inReplyTo || undefined,
 		references: refs,
-		rawReferences: input.rawReferences,
+		rawReferences: input.rawReferences || formatReferences(input.references ?? []) || undefined,
 		at: input.sentAt || new Date().toISOString(),
 	};
 	append(workingDir, record);

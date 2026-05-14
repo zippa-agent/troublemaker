@@ -33,7 +33,10 @@ export interface ContactRef {
 export type EmailThreadRef = {
 	kind: "thread";
 	adapter: "email";
+	/** Stable conversation key. */
 	id: string;
+	/** Exact inbound Message-ID this reply should parent to, when known. */
+	parentMessageId?: string;
 };
 export type SlackThreadRef = {
 	kind: "thread";
@@ -69,8 +72,10 @@ export type AnyRef = ChannelRef | ContactRef | ThreadRef;
 
 export function encodeThreadRef(ref: ThreadRef): string {
 	switch (ref.adapter) {
-		case "email":
-			return `email:thread:${ref.id}`;
+		case "email": {
+			const parent = ref.parentMessageId ? `:parent:${encodeURIComponent(ref.parentMessageId)}` : "";
+			return `email:thread:${ref.id}${parent}`;
+		}
 		case "slack":
 			return `slack:thread:${ref.channel}:${ref.threadTs}`;
 		case "telegram":
@@ -82,9 +87,16 @@ export function encodeThreadRef(ref: ThreadRef): string {
 
 export function decodeThreadRef(encoded: string): ThreadRef | undefined {
 	if (encoded.startsWith("email:thread:")) {
-		const id = encoded.slice("email:thread:".length).trim();
-		if (!id) return undefined;
-		return { kind: "thread", adapter: "email", id };
+		const rest = encoded.slice("email:thread:".length).trim();
+		if (!rest) return undefined;
+		const marker = rest.lastIndexOf(":parent:");
+		if (marker !== -1) {
+			const id = rest.slice(0, marker);
+			const parentMessageId = decodeURIComponent(rest.slice(marker + ":parent:".length));
+			if (!id) return undefined;
+			return { kind: "thread", adapter: "email", id, parentMessageId };
+		}
+		return { kind: "thread", adapter: "email", id: rest };
 	}
 	if (encoded.startsWith("slack:thread:")) {
 		const rest = encoded.slice("slack:thread:".length);

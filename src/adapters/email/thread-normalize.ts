@@ -114,11 +114,18 @@ export function mergeReferences(existing: string[], add: Array<string | undefine
 	const out: string[] = [];
 	for (const id of [...existing, ...add]) {
 		const c = canonicalMessageId(id || "");
-		if (!c || seen.has(c)) continue;
+		if (!looksLikeMessageId(c) || seen.has(c)) continue;
 		seen.add(c);
 		out.push(c);
 	}
 	return out;
+}
+
+/** Format canonical Message-IDs as a References header value. */
+export function formatReferences(ids: string[]): string {
+	return mergeReferences(ids, [])
+		.map((id) => `<${id}>`)
+		.join(" ");
 }
 
 /**

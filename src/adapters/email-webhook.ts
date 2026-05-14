@@ -11,10 +11,12 @@ import { composeEmailReplyBody, type EmailReplyQuote } from "./email/reply-compo
 import {
 	appendInbound as appendInboundEvent,
 	appendOutbound as appendOutboundEvent,
+	findByMessageId,
 	findByThreadKey,
 	type EmailEventRecord,
 	summarizeThread,
 } from "./email/thread-store.js";
+import { formatReferences, mergeReferences, parseReferences } from "./email/thread-normalize.js";
 import type { ChannelInfo, MomContext, MomEvent, MomHandler, PlatformAdapter, UserInfo } from "./types.js";
 
 // ============================================================================
@@ -263,7 +265,7 @@ Keep responses concise and professional. The user will receive one email with yo
 		}
 
 		if (threadKey) {
-			const threadRef: EmailThreadRef = { kind: "thread", adapter: "email", id: threadKey };
+			const threadRef: EmailThreadRef = { kind: "thread", adapter: "email", id: threadKey, parentMessageId: payload.messageId };
 			parts.push(`Thread: ${encodeThreadRef(threadRef)}`);
 		}
 
@@ -623,7 +625,6 @@ Keep responses concise and professional. The user will receive one email with yo
 				subject: resolvedSubject,
 				body: text,
 				providerMessageId: result.messageId,
-				rfcMessageId: result.messageId,
 				inReplyTo: replyContext?.messageId,
 				references: replyContext?.references ? replyContext.references.split(/\s+/) : [],
 				channelId: channel,
@@ -655,7 +656,8 @@ Keep responses concise and professional. The user will receive one email with yo
 	getThreadRef(event: MomEvent): ThreadRef | undefined {
 		const key = this.activeThreadKeys.get(event.channel);
 		if (!key) return undefined;
-		return { kind: "thread", adapter: "email", id: key };
+		const parentMessageId = this.pendingPayloads.get(event.channel)?.messageId;
+		return { kind: "thread", adapter: "email", id: key, parentMessageId };
 	}
 
 	async sendMessage(request: SendMessageRequest): Promise<SendMessageResult> {
@@ -706,15 +708,25 @@ Keep responses concise and professional. The user will receive one email with yo
 		// recent inbound in the thread, not from a summary union (which loses
 		// chain order and can include unrelated branches).
 		const allEvents = findByThreadKey(this.workingDir, thread.id);
-		const parentInbound = lastOf(allEvents, (e) => e.type === "inbound");
+		const explicitParent = thread.parentMessageId ? findByMessageId(this.workingDir, thread.parentMessageId) : undefined;
+		const parentInbound = explicitParent?.type === "inbound" && explicitParent.threadKey === thread.id
+			? explicitParent
+			: lastOf(allEvents, (e) => e.type === "inbound");
 		const inReplyTo = parentInbound?.messageId;
-		const parentRawReferences = parentInbound?.rawReferences?.trim() || "";
-		const parentMessageId = parentInbound?.messageId
-			? `<${parentInbound.messageId}>`
-			: "";
+		const parentReferences = parentInbound
+			? mergeReferences(
+				parentInbound.rawReferences ? parseReferences(parentInbound.rawReferences) : parentInbound.references,
+				[],
+			)
+			: [];
+		const parentRawReferences = parentInbound?.rawReferences?.trim() || formatReferences(parentReferences);
+		const parentMessageId = parentInbound?.messageId ? `<${parentInbound.messageId}>` : "";
 		const outboundRawReferences = parentRawReferences
 			? `${parentRawReferences} ${parentMessageId}`.trim()
 			: parentMessageId;
+		const outboundReferences = parentInbound?.messageId
+			? mergeReferences(parentReferences, [parentInbound.messageId])
+			: parentReferences;
 
 		const replyQuoteRecord = this.activeReplyContexts.get(summary.channelId);
 		const replyQuote = replyQuoteRecord?.replyQuote;
@@ -741,9 +753,8 @@ Keep responses concise and professional. The user will receive one email with yo
 				subject,
 				body: request.text,
 				providerMessageId: result.messageId,
-				rfcMessageId: result.messageId,
 				inReplyTo,
-				references: summary.references.slice(),
+				references: outboundReferences,
 				rawReferences: outboundRawReferences || undefined,
 				channelId: summary.channelId,
 			});
@@ -1126,7 +1137,6 @@ Keep responses concise and professional. The user will receive one email with yo
 							subject: replySubject,
 							body: finalText,
 							providerMessageId: result.messageId,
-							rfcMessageId: result.messageId,
 							inReplyTo: meta.messageId,
 							references: meta.references ? meta.references.split(/\s+/) : [],
 							channelId: channelId || "",
