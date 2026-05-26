@@ -161,6 +161,7 @@ export class SlackWebhookAdapter extends SlackBase {
 			type: "mention",
 			channel: event.channel,
 			ts: event.ts,
+			thread_ts: event.thread_ts,
 			user: event.user || event.bot_id || "unknown",
 			text: (event.text || "").replace(/<@[A-Z0-9]+>/gi, "").trim(),
 			files: event.files,
@@ -180,7 +181,7 @@ export class SlackWebhookAdapter extends SlackBase {
 			if (this.handler.isRunning(event.channel)) {
 				this.handler.handleStop(event.channel, this);
 			} else {
-				this.postMessage(event.channel, "_Nothing running_");
+				this.postEventReply(momEvent, "_Nothing running_");
 			}
 			return;
 		}
@@ -207,6 +208,7 @@ export class SlackWebhookAdapter extends SlackBase {
 			type: isDM ? "dm" : "mention",
 			channel: event.channel,
 			ts: event.ts,
+			thread_ts: event.thread_ts,
 			user: userId,
 			text: (event.text || "").replace(/<@[A-Z0-9]+>/gi, "").trim(),
 			files: event.files,
@@ -227,7 +229,7 @@ export class SlackWebhookAdapter extends SlackBase {
 				if (this.handler.isRunning(event.channel)) {
 					this.handler.handleStop(event.channel, this);
 				} else {
-					this.postMessage(event.channel, "_Nothing running_");
+					this.postEventReply(momEvent, "_Nothing running_");
 				}
 				return;
 			}
@@ -263,6 +265,7 @@ interface SlackEventInner {
 	bot_id?: string;
 	text?: string;
 	ts: string;
+	thread_ts?: string;
 	subtype?: string;
 	files?: Array<{ name: string; url_private_download?: string; url_private?: string }>;
 }

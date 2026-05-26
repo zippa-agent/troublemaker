@@ -46,6 +46,7 @@ export class SlackSocketAdapter extends SlackBase {
 				user?: string;
 				bot_id?: string;
 				ts: string;
+				thread_ts?: string;
 				files?: Array<{ name: string; url_private_download?: string; url_private?: string }>;
 			};
 
@@ -71,6 +72,7 @@ export class SlackSocketAdapter extends SlackBase {
 				type: "mention",
 				channel: e.channel,
 				ts: e.ts,
+				thread_ts: e.thread_ts,
 				user: userId,
 				text: (e.text || "").replace(/<@[A-Z0-9]+>/gi, "").trim(),
 				files: e.files,
@@ -100,7 +102,7 @@ export class SlackSocketAdapter extends SlackBase {
 				if (this.handler.isRunning(e.channel)) {
 					this.handler.handleStop(e.channel, this);
 				} else {
-					this.postMessage(e.channel, "_Nothing running_");
+					this.postEventReply(momEvent, "_Nothing running_");
 				}
 				ack();
 				return;
@@ -125,6 +127,7 @@ export class SlackSocketAdapter extends SlackBase {
 				channel_type?: string;
 				subtype?: string;
 				bot_id?: string;
+				thread_ts?: string;
 				files?: Array<{ name: string; url_private_download?: string; url_private?: string }>;
 			};
 
@@ -166,6 +169,7 @@ export class SlackSocketAdapter extends SlackBase {
 				type: isDM ? "dm" : "mention",
 				channel: e.channel,
 				ts: e.ts,
+				thread_ts: e.thread_ts,
 				user: userId,
 				text: (e.text || "").replace(/<@[A-Z0-9]+>/gi, "").trim(),
 				files: e.files,
@@ -194,7 +198,7 @@ export class SlackSocketAdapter extends SlackBase {
 					if (this.handler.isRunning(e.channel)) {
 						this.handler.handleStop(e.channel, this);
 					} else {
-						this.postMessage(e.channel, "_Nothing running_");
+						this.postEventReply(momEvent, "_Nothing running_");
 					}
 					ack();
 					return;

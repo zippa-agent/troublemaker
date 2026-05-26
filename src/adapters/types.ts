@@ -13,6 +13,8 @@ export interface MomEvent {
 	type: "mention" | "dm";
 	channel: string;
 	ts: string;
+	/** Slack thread parent timestamp when the inbound event happened in a thread. */
+	thread_ts?: string;
 	user: string;
 	text: string;
 	files?: Array<{ name?: string; url_private_download?: string; url_private?: string }>;
@@ -174,4 +176,10 @@ export interface PlatformAdapter {
 	// -- Event queue --
 
 	enqueueEvent(event: MomEvent): boolean;
+
+	/**
+	 * Optional per-event scope for adapters that need outbound calls during a run
+	 * to inherit inbound metadata, such as Slack thread_ts.
+	 */
+	runWithEventScope?<T>(event: MomEvent, work: () => Promise<T>): Promise<T>;
 }

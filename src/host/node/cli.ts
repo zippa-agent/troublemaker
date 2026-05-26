@@ -680,6 +680,10 @@ function buildInterruptEvent(batch: PendingInterrupt[]): { event: MomEvent; adap
 	};
 }
 
+function runInAdapterEventScope<T>(event: MomEvent, adapter: PlatformAdapter, work: () => Promise<T>): Promise<T> {
+	return adapter.runWithEventScope ? adapter.runWithEventScope(event, work) : work();
+}
+
 function enqueueHardInterrupt(event: MomEvent, adapter: PlatformAdapter): void {
 	pendingInterrupts.push({ event, adapter, receivedAt: Date.now() });
 	if (pendingInterrupts.length > MAX_INTERRUPT_BATCH) {
@@ -712,7 +716,7 @@ function scheduleInterruptRestart(): void {
 
 		const { event, adapter } = buildInterruptEvent(batch);
 		log.logInfo(`[interrupt:${event.channel}] Restarting from ${batch.length} pending message(s)`);
-		await runEventInSlot(event, adapter, false);
+		await runInAdapterEventScope(event, adapter, () => runEventInSlot(event, adapter, false));
 
 		if (pendingInterrupts.length > 0) {
 			scheduleInterruptRestart();
@@ -857,7 +861,7 @@ const handler: MomHandler = {
 
 	async handleEvent(event: MomEvent, platform: PlatformAdapter, isEvent?: boolean): Promise<void> {
 		const label = `${platform.name}:${event.channel}`;
-		return withGlobalRunSlot(label, () => runEventInSlot(event, platform, isEvent));
+		return withGlobalRunSlot(label, () => runInAdapterEventScope(event, platform, () => runEventInSlot(event, platform, isEvent)));
 	},
 };
 

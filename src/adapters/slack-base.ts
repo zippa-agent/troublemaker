@@ -1,4 +1,5 @@
 import { WebClient } from "@slack/web-api";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { appendFileSync, existsSync, readFileSync } from "fs";
 import { basename, join } from "path";
 import { MomSettingsManager } from "../context.js";
@@ -95,6 +96,7 @@ When mentioning users, use <@username> format (e.g., <@mario>).`;
 	protected users = new Map<string, SlackUser>();
 	protected channels = new Map<string, SlackChannel>();
 	protected queues = new Map<string, ChannelQueue>();
+	private threadScope = new AsyncLocalStorage<{ channel: string; threadTs: string }>();
 
 	constructor(config: SlackBaseConfig) {
 		this.workingDir = config.workingDir;
@@ -106,6 +108,12 @@ When mentioning users, use <@username> format (e.g., <@mario>).`;
 
 	setHandler(handler: MomHandler): void {
 		this.handler = handler;
+	}
+
+	runWithEventScope<T>(event: MomEvent, work: () => Promise<T>): Promise<T> {
+		const threadTs = this.getEventThreadTs(event);
+		if (!threadTs) return work();
+		return this.threadScope.run({ channel: event.channel, threadTs }, work);
 	}
 
 	// ==========================================================================
@@ -164,7 +172,13 @@ When mentioning users, use <@username> format (e.g., <@mario>).`;
 	}
 
 	async postMessage(channel: string, text: string): Promise<string> {
-		const result = await this.webClient.chat.postMessage({ channel, text: markdownToSlackMrkdwn(text) });
+		const scoped = this.threadScope.getStore();
+		const threadTs = scoped?.channel === channel ? scoped.threadTs : undefined;
+		const result = await this.webClient.chat.postMessage({
+			channel,
+			text: markdownToSlackMrkdwn(text),
+			...(threadTs ? { thread_ts: threadTs } : {}),
+		});
 		return result.ts as string;
 	}
 
@@ -214,6 +228,17 @@ When mentioning users, use <@username> format (e.g., <@mario>).`;
 		}
 	}
 
+	protected getEventThreadTs(event: MomEvent): string | undefined {
+		if (event.thread_ts) return event.thread_ts;
+		if (event.channel.startsWith("D")) return undefined;
+		return event.ts;
+	}
+
+	protected postEventReply(event: MomEvent, text: string): Promise<string> {
+		const threadTs = this.getEventThreadTs(event);
+		return threadTs ? this.postInThread(event.channel, threadTs, text) : this.postMessage(event.channel, text);
+	}
+
 	enqueueEvent(event: MomEvent): boolean {
 		// Slack channel IDs start with C (channel), D (DM), or G (group)
 		if (!/^[CDG]/.test(event.channel)) return false;
@@ -241,10 +266,15 @@ When mentioning users, use <@username> format (e.g., <@mario>).`;
 		// Track thread messages and working message ID for respondInThread + deleteMessage
 		const threadMessageTs: string[] = [];
 		let workingMessageId: string | null = null;
+		const threadTs = this.getEventThreadTs(event);
+		const postReply = (channel: string, text: string) =>
+			threadTs && channel === event.channel
+				? this.postInThread(channel, threadTs, text)
+				: this.postMessage(channel, text);
 
 		return createTwoMessageContext(
 			{
-				post: (ch, text) => this.postMessage(ch, text),
+				post: postReply,
 				update: (ch, id, text) => this.updateMessage(ch, id, text),
 				delete: (ch, id) => this.deleteMessage(ch, id),
 				formatStatus: (text) => `_${text}_`,
@@ -267,8 +297,9 @@ When mentioning users, use <@username> format (e.g., <@mario>).`;
 				},
 				logBotResponse: (ch, text, ts) => this.logBotResponse(ch, text, ts),
 				respondInThread: async (text) => {
-					if (workingMessageId) {
-						const ts = await this.postInThread(event.channel, workingMessageId, text);
+					const replyThreadTs = threadTs ?? workingMessageId;
+					if (replyThreadTs) {
+						const ts = await this.postInThread(event.channel, replyThreadTs, text);
 						threadMessageTs.push(ts);
 					}
 				},
@@ -315,6 +346,7 @@ When mentioning users, use <@username> format (e.g., <@mario>).`;
 			userName: user?.userName,
 			displayName: user?.displayName,
 			text: event.text,
+			thread_ts: event.thread_ts,
 			attachments,
 			isBot: false,
 		});
