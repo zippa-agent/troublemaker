@@ -90,9 +90,9 @@
 	},
 	"dependencies": {
 		"@anthropic-ai/sandbox-runtime": "0.0.16",
-		"@earendil-works/pi-agent-core": "0.78.0",
-		"@earendil-works/pi-ai": "0.78.0",
-		"@earendil-works/pi-coding-agent": "0.78.0",
+		"@earendil-works/pi-agent-core": "file:../pi/packages/agent",
+		"@earendil-works/pi-ai": "file:../pi/packages/ai",
+		"@earendil-works/pi-coding-agent": "file:../pi/packages/coding-agent",
 		"@modelcontextprotocol/sdk": "^1.29.0",
 		"@mozilla/readability": "0.6.0",
 		"@slack/socket-mode": "2.0.5",
