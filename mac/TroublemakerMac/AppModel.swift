@@ -118,7 +118,7 @@ final class AppModel: ObservableObject {
 	@Published var logs: [String] = []
 	@Published var lastTranscript = ""
 	@Published var isSending = false
-	@Published var selectedVoiceProvider: VoiceProviderKind = .localTroublemaker
+	@Published var selectedVoiceProvider: VoiceProviderKind = .openAIRealtime
 	@Published var selectedRealtimeVoice: RealtimeVoice = .marin
 	@Published var voiceState: VoiceRuntimeState = .idle
 	@Published var voiceStatus = "Voice idle"
