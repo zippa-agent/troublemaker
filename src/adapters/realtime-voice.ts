@@ -2,7 +2,9 @@ import { appendFileSync } from "fs";
 import type { IncomingMessage } from "http";
 import type { Socket } from "net";
 import { join } from "path";
-import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
+import { Agent, type AgentEvent, type AgentTool, type AgentToolResult, type StreamFn } from "@earendil-works/pi-agent-core";
+import { getModel, stream, type Api, type Model } from "@earendil-works/pi-ai";
+import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import WebSocket, { WebSocketServer } from "ws";
 import * as log from "../log.js";
 import type { LocalEventboxClient, LocalEventboxEvent } from "../local/eventbox-client.js";
@@ -14,6 +16,20 @@ const TRANSCRIPTION_MODEL = "gpt-realtime-whisper";
 const DEFAULT_VOICE = "marin";
 const REALTIME_AGENT_NAME = "Zip";
 const MAX_TOOL_OUTPUT_CHARS = 12000;
+const DEFAULT_REALTIME_RESPONSE_BACKEND = "auto";
+const FALLBACK_OPENAI_REALTIME_MODEL: Model<Api> = {
+	id: REALTIME_MODEL,
+	name: "GPT Realtime 2",
+	api: "openai-realtime" as Api,
+	provider: "openai",
+	baseUrl: "https://api.openai.com/v1",
+	reasoning: true,
+	thinkingLevelMap: { off: null, xhigh: "xhigh" },
+	input: ["text", "image"],
+	cost: { input: 4, output: 24, cacheRead: 0.4, cacheWrite: 0 },
+	contextWindow: 128000,
+	maxTokens: 32000,
+};
 
 export interface RealtimeVoiceBridgeConfig {
 	workingDir: string;
@@ -140,6 +156,7 @@ class RealtimeVoiceSession {
 	private readonly client: WebSocket;
 	private readonly config: RealtimeVoiceBridgeConfig;
 	private openai: WebSocket | null = null;
+	private apiKey = "";
 	private voice = DEFAULT_VOICE;
 	private agentName = REALTIME_AGENT_NAME;
 	private responseActive = false;
@@ -149,7 +166,11 @@ class RealtimeVoiceSession {
 	private currentAssistantText = "";
 	private userSpeechActive = false;
 	private pendingEventboxResponse = false;
+	private pendingEventboxContexts: string[] = [];
 	private eventboxUnsubscribe: (() => void) | null = null;
+	private piAgent: Agent | null = null;
+	private piRunToken = 0;
+	private piResponderKnownBroken = false;
 
 	constructor(client: WebSocket, config: RealtimeVoiceBridgeConfig) {
 		this.client = client;
@@ -219,6 +240,7 @@ class RealtimeVoiceSession {
 			});
 			return;
 		}
+		this.apiKey = apiKey;
 		this.connectOpenAI(apiKey);
 	}
 
@@ -271,13 +293,22 @@ class RealtimeVoiceSession {
 				this.responseCancelSent = false;
 				this.currentAssistantText = "";
 				break;
-			case "input_audio_buffer.speech_started":
+			case "input_audio_buffer.speech_started": {
 				this.userSpeechActive = true;
-				this.sendClient({ type: this.responseActive ? "barge_in" : "transcribing" });
+				const wasResponding = this.responseActive;
+				if (wasResponding) this.cancelActiveResponse();
+				this.sendClient({ type: wasResponding ? "barge_in" : "transcribing" });
 				break;
+			}
 			case "input_audio_buffer.speech_stopped":
 				this.userSpeechActive = false;
-				if (this.pendingEventboxResponse && !this.responseActive) this.sendResponseCreate();
+				if (this.pendingEventboxResponse && !this.responseActive) {
+					if (this.shouldUsePiRealtimeResponder()) {
+						this.runPendingPiEventboxResponse();
+					} else {
+						this.sendResponseCreate();
+					}
+				}
 				break;
 			case "input_audio_buffer.committed":
 				this.userSpeechActive = false;
@@ -339,9 +370,11 @@ class RealtimeVoiceSession {
 		this.logVoiceLine({ text, isBot: false });
 		this.publishEventboxTurn("turn.user.final", { text });
 		if (this.responseActive) {
-			this.responseCancelSent = true;
-			this.sendClient({ type: "interrupt_audio" });
-			this.sendOpenAI({ type: "response.cancel" });
+			this.cancelActiveResponse();
+		}
+		if (this.shouldUsePiRealtimeResponder()) {
+			void this.runPiRealtimeResponse(text);
+			return;
 		}
 		this.sendResponseCreate();
 	}
@@ -408,6 +441,149 @@ class RealtimeVoiceSession {
 		}
 	}
 
+	private shouldUsePiRealtimeResponder(): boolean {
+		if (this.piResponderKnownBroken) return false;
+		const backend = (process.env.TROUBLEMAKER_REALTIME_RESPONSE_BACKEND
+			|| process.env.MOM_REALTIME_RESPONSE_BACKEND
+			|| DEFAULT_REALTIME_RESPONSE_BACKEND).trim().toLowerCase();
+		if (["legacy", "direct", "openai-ws"].includes(backend)) return false;
+		if (["pi", "pi-ai", "agent"].includes(backend)) return true;
+		return getRegisteredPiRealtimeModel() !== null;
+	}
+
+	private getOrCreatePiAgent(): Agent {
+		const model = getRegisteredPiRealtimeModel() ?? FALLBACK_OPENAI_REALTIME_MODEL;
+		const streamFn: StreamFn = (streamModel, context, options) => stream(streamModel, context, {
+			...options,
+			apiKey: this.apiKey,
+			reasoningEffort: options?.reasoning,
+			outputModalities: ["audio"],
+			voice: this.voice,
+			audioOutputFormat: { type: "audio/pcm", rate: 24000 },
+			onAudioDelta: (event: { delta?: unknown }) => {
+				this.sendAudioDelta(String(event.delta ?? ""));
+			},
+			onAudioDone: () => {
+				this.sendClient({ type: "speaking", message: "Finishing Realtime audio..." });
+			},
+		} as any);
+
+		if (!this.piAgent) {
+			this.piAgent = new Agent({
+				initialState: {
+					systemPrompt: createRealtimeVoiceInstructions(this.contextBriefing()),
+					model,
+					thinkingLevel: "low",
+					tools: this.config.tools().filter((tool) => tool.name !== "speak"),
+				},
+				convertToLlm,
+				streamFn,
+				getApiKey: async (provider) => provider === "openai" ? this.apiKey : undefined,
+			});
+			this.piAgent.subscribe((event) => this.handlePiAgentEvent(event));
+		} else {
+			this.piAgent.state.systemPrompt = createRealtimeVoiceInstructions(this.contextBriefing());
+			this.piAgent.state.model = model;
+			this.piAgent.state.tools = this.config.tools().filter((tool) => tool.name !== "speak");
+		}
+		return this.piAgent;
+	}
+
+	private async runPiRealtimeResponse(text: string): Promise<void> {
+		const token = ++this.piRunToken;
+		this.responseActive = true;
+		this.responseCancelSent = false;
+		this.currentAssistantText = "";
+		this.pendingEventboxResponse = false;
+		this.sendClient({ type: "thinking", message: "Pi Realtime 2 is thinking..." });
+
+		try {
+			const agent = this.getOrCreatePiAgent();
+			await agent.prompt(text);
+			await agent.waitForIdle();
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			if (isMissingPiRealtimeProviderError(message)) {
+				this.piResponderKnownBroken = true;
+				log.logWarning("[realtime-voice] Pi Realtime responder unavailable; falling back to legacy OpenAI WS responder", message);
+				if (token === this.piRunToken) {
+					this.responseActive = false;
+					this.currentAssistantText = "";
+					this.piRunToken++;
+					this.sendResponseCreate();
+				}
+				return;
+			}
+			this.sendClient({ type: "error", message });
+			log.logWarning("[realtime-voice] Pi Realtime response failed", message);
+		} finally {
+			if (token !== this.piRunToken) return;
+			this.responseActive = false;
+			this.responseCancelSent = false;
+			const assistantText = this.currentAssistantText.trim();
+			if (assistantText) {
+				this.logVoiceLine({ text: assistantText, isBot: true });
+				this.publishEventboxTurn("turn.assistant.final", { text: assistantText });
+			}
+			if (this.pendingEventboxResponse && !this.userSpeechActive) {
+				this.runPendingPiEventboxResponse();
+				return;
+			}
+			this.sendClient({ type: "listening", message: "Listening with Pi Realtime 2..." });
+		}
+	}
+
+	private handlePiAgentEvent(event: AgentEvent): void {
+		if (event.type === "message_update") {
+			const update = event.assistantMessageEvent as any;
+			if (update.type === "text_delta") {
+				const delta = String(update.delta ?? "");
+				if (!delta) return;
+				this.currentAssistantText += delta;
+				this.sendClient({ type: "assistant_text_delta", text: delta });
+				this.sendClient({ type: "speaking" });
+			} else if (update.type === "text_end") {
+				const text = extractPiPartialText(update.partial, update.contentIndex);
+				if (text) {
+					this.currentAssistantText = text;
+					this.sendClient({ type: "assistant_text", text });
+				}
+			} else if (update.type === "toolcall_start" || update.type === "toolcall_delta") {
+				const name = String(update.toolCall?.name ?? update.toolCalls?.[0]?.name ?? "tool");
+				this.sendClient({ type: "thinking", message: `Using ${name}...` });
+			}
+			return;
+		}
+		if (event.type === "tool_execution_start") {
+			this.sendClient({ type: "thinking", message: `Using ${event.toolName}...` });
+		} else if (event.type === "message_end" && event.message.role === "assistant") {
+			const text = event.message.content
+				.map((part) => part.type === "text" ? part.text : "")
+				.filter(Boolean)
+				.join("\n");
+			if (text.trim()) {
+				this.currentAssistantText = text;
+				this.sendClient({ type: "assistant_text", text });
+			}
+		}
+	}
+
+	private runPendingPiEventboxResponse(): void {
+		const context = this.pendingEventboxContexts.splice(0).join("\n\n").trim();
+		this.pendingEventboxResponse = false;
+		if (!context) return;
+		void this.runPiRealtimeResponse(context);
+	}
+
+	private cancelActiveResponse(): void {
+		this.responseCancelSent = true;
+		this.sendClient({ type: "interrupt_audio" });
+		this.piRunToken++;
+		this.piAgent?.abort();
+		this.sendOpenAI({ type: "response.cancel" });
+		this.responseActive = false;
+	}
+
 	private forwardAudio(data: WebSocket.RawData): void {
 		if (!this.openai || this.openai.readyState !== WebSocket.OPEN) return;
 		const buffer = data instanceof Buffer ? data : Buffer.from(data as ArrayBuffer);
@@ -420,10 +596,10 @@ class RealtimeVoiceSession {
 
 	private interrupt(): void {
 		this.sendOpenAI({ type: "input_audio_buffer.clear" });
-		this.sendClient({ type: "interrupt_audio" });
 		if (this.responseActive && !this.responseCancelSent) {
-			this.responseCancelSent = true;
-			this.sendOpenAI({ type: "response.cancel" });
+			this.cancelActiveResponse();
+		} else {
+			this.sendClient({ type: "interrupt_audio" });
 		}
 		this.sendClient({ type: "listening", message: "Listening with Realtime 2..." });
 	}
@@ -460,7 +636,17 @@ class RealtimeVoiceSession {
 			message: displayCloudInbound(payload),
 		});
 		const context = formatCloudInboundContext(payload);
-		if (!context || !this.openai || this.openai.readyState !== WebSocket.OPEN) return;
+		if (!context) return;
+		if (this.shouldUsePiRealtimeResponder()) {
+			if (this.responseActive || this.userSpeechActive) {
+				this.pendingEventboxResponse = true;
+				this.pendingEventboxContexts.push(context);
+				return;
+			}
+			void this.runPiRealtimeResponse(context);
+			return;
+		}
+		if (!this.openai || this.openai.readyState !== WebSocket.OPEN) return;
 		this.sendOpenAI({
 			event_id: `eventbox_context_${sanitizeEventId(eventId)}`,
 			type: "conversation.item.create",
@@ -528,12 +714,41 @@ class RealtimeVoiceSession {
 	private close(): void {
 		this.eventboxUnsubscribe?.();
 		this.eventboxUnsubscribe = null;
+		this.piRunToken++;
+		this.piAgent?.abort();
+		this.piAgent = null;
 		this.openai?.close();
 		this.openai = null;
 		if (this.client.readyState === WebSocket.OPEN) {
 			this.client.close();
 		}
 	}
+}
+
+function getRegisteredPiRealtimeModel(): Model<Api> | null {
+	const model = getModel("openai" as any, REALTIME_MODEL as any) as Model<Api> | undefined;
+	if (!model || model.api !== "openai-realtime") return null;
+	return model;
+}
+
+function isMissingPiRealtimeProviderError(message: string): boolean {
+	const lower = message.toLowerCase();
+	return lower.includes("openai-realtime") && (
+		lower.includes("no stream")
+		|| lower.includes("not registered")
+		|| lower.includes("not found")
+		|| lower.includes("unsupported")
+		|| lower.includes("unknown api")
+	);
+}
+
+function extractPiPartialText(partial: unknown, contentIndex: unknown): string {
+	if (!partial || typeof partial !== "object") return "";
+	const content = (partial as { content?: unknown }).content;
+	if (!Array.isArray(content)) return "";
+	const index = typeof contentIndex === "number" ? contentIndex : content.length - 1;
+	const block = content[index] as { type?: unknown; text?: unknown } | undefined;
+	return block?.type === "text" && typeof block.text === "string" ? block.text : "";
 }
 
 function cloneJsonSchema(schema: unknown): Record<string, unknown> {
