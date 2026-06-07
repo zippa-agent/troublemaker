@@ -41,6 +41,7 @@ const edgeFiles = [
 	"src/modes/edge/tools.ts",
 	"src/modes/edge/host-bridge.ts",
 	"src/modes/edge/r2-compat.ts",
+	"src/modes/edge/troublemaker-extension.ts",
 ];
 
 for (const file of edgeFiles) {

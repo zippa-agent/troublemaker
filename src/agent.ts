@@ -9,7 +9,6 @@ import {
 	ModelRegistry,
 	type ResourceLoader,
 	SessionManager,
-	type Skill,
 } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "crypto";
 import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "fs";
@@ -23,6 +22,7 @@ import {
 	getWorkspaceContext,
 	getWorkspaceSkillsMtime,
 	resolveThinkingLevel,
+	type Skill,
 } from "./core/prompt.js";
 import * as log from "./log.js";
 import { resolveModel, resolveApiKey } from "./model-config.js";

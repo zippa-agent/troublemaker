@@ -5,8 +5,12 @@ import { normalizeThinkingLevelForModel } from "../../model-thinking.js";
 import type { EdgeHostBridge } from "./host-bridge.js";
 import { createEdgeAgentSession } from "./pi-session.js";
 import { createEdgeBashTool } from "./tools.js";
+import {
+	createTroublemakerEdgeTurn,
+	type EdgeTroublemakerExtensionContext,
+} from "./troublemaker-extension.js";
 
-export interface EdgeWebChatOptions {
+export interface EdgeWebChatOptions extends EdgeTroublemakerExtensionContext {
 	input: WebTurnInput;
 	history?: AgentMessage[];
 	promptMessage?: AgentMessage;
@@ -21,10 +25,6 @@ export interface EdgeWebChatResult {
 	messages: AgentMessage[];
 	newMessages: AgentMessage[];
 }
-
-const DEFAULT_SYSTEM_PROMPT = `You are Troublemaker, a practical AI agent running in TinyFat's hosted web console.
-
-You can answer directly for ordinary conversation. Use the bash tool only when shell access, repository inspection, or local execution is required. In edge mode bash wakes the host container, so batch related shell work thoughtfully.`;
 
 const DEFAULT_EDGE_FIREWORKS_MODEL_ID = "accounts/fireworks/models/glm-5p1";
 
@@ -41,8 +41,9 @@ export async function runEdgeWebChat(options: EdgeWebChatOptions): Promise<EdgeW
 	await options.emit({ type: "status", status: "accepted", message: "Edge turn accepted", mode: "edge" });
 
 	const model = createFireworksModel(options.settings, options.modelBaseUrl);
+	const turn = createTroublemakerEdgeTurn(options.input, options.settings, model, options);
 	const agent = createEdgeAgentSession({
-		systemPrompt: options.settings?.systemPrompt || DEFAULT_SYSTEM_PROMPT,
+		systemPrompt: turn.systemPrompt,
 		model,
 		apiKey: options.modelApiKey,
 		thinkingLevel: normalizeThinkingLevelForModel(model, options.settings?.thinkingLevel),
@@ -53,7 +54,7 @@ export async function runEdgeWebChat(options: EdgeWebChatOptions): Promise<EdgeW
 	});
 
 	const initialMessageCount = agent.state.messages.length;
-	const promptMessage = options.promptMessage ?? options.input.message;
+	const promptMessage = options.promptMessage ?? turn.promptMessage;
 	await options.emit({ type: "status", status: "connecting", message: "Edge runtime ready", mode: "edge" });
 	if (typeof promptMessage === "string") {
 		await agent.prompt(promptMessage);
