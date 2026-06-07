@@ -24,3 +24,11 @@ export { createHostBashRoute } from "./modes/host/index.js";
 export type { HostBashRequest, HostBashResponse, HostToolRequest, HostToolResponse } from "./modes/host/protocol.js";
 export { composeEmailReplyBody, type EmailReplyQuote } from "./adapters/email/reply-composer.js";
 export { buildReplyThreadHeaders, compileReferences, normalizeMessageIdForHeader, parseReferencesHeader } from "./adapters/email/thread-headers.js";
+export {
+	buildEmailConversationQuoteBody,
+	buildEmailReplyQuoteFromThreadEvents,
+	parseEmailThreadLedger,
+	type EmailThreadQuoteCurrent,
+	type EmailThreadQuoteEvent,
+	type EmailThreadQuoteTurn,
+} from "./adapters/email/thread-quote.js";

@@ -19,3 +19,11 @@ export type {
 } from "../../src/core/runtime-contract.js";
 export { composeEmailReplyBody, type EmailReplyQuote } from "../../src/adapters/email/reply-composer.js";
 export { buildReplyThreadHeaders, compileReferences, normalizeMessageIdForHeader, parseReferencesHeader } from "../../src/adapters/email/thread-headers.js";
+export {
+	buildEmailConversationQuoteBody,
+	buildEmailReplyQuoteFromThreadEvents,
+	parseEmailThreadLedger,
+	type EmailThreadQuoteCurrent,
+	type EmailThreadQuoteEvent,
+	type EmailThreadQuoteTurn,
+} from "../../src/adapters/email/thread-quote.js";

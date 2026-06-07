@@ -7,9 +7,9 @@ export function shouldAutoOpenToolDetails(hasDetails: boolean, isRunning?: boole
 export function shouldAutoCollapseToolDetails(
   hasAutoExpanded: boolean,
   isRunning?: boolean,
-  collapseRequested?: boolean,
+  _collapseRequested?: boolean,
 ): boolean {
-  return hasAutoExpanded && !isRunning && !!collapseRequested;
+  return hasAutoExpanded && !isRunning;
 }
 
 export function isToolDetailsExpanded(hasDetails: boolean, manualOpen: boolean, autoOpen: boolean): boolean {

@@ -83,6 +83,7 @@ export function formatChannel(channel: string): { label: string; type: string } 
   if (channel === 'voice' || channel === 'web-voice') return { label: 'voice', type: 'voice' };
   if (channel === 'web' || channel === 'web-user') return { label: 'web', type: 'web' };
   if (channel.startsWith('email-')) return { label: 'email', type: 'email' };
+  if (channel.startsWith('slack:')) return { label: formatSlackChannelLabel(channel.slice('slack:'.length)), type: 'slack' };
   if (channel.startsWith('telegram:') || /^-?\d+$/.test(channel)) return { label: channel.replace('telegram:', ''), type: 'telegram' };
   if (channel === 'DM:Alex' || channel.startsWith('DM:')) return { label: channel, type: 'telegram' };
   if (/^[CDG]/.test(channel)) return { label: `#${channel}`, type: 'slack' };
@@ -90,6 +91,13 @@ export function formatChannel(channel: string): { label: string; type: string } 
     return { label: `#${channel}`, type: 'slack' };
   }
   return { label: channel, type: 'unknown' };
+}
+
+function formatSlackChannelLabel(raw: string): string {
+  if (!raw) return 'slack';
+  if (raw.startsWith('#') || raw.startsWith('DM:')) return raw;
+  if (/^[CDG][A-Z0-9]+$/.test(raw)) return `#${raw}`;
+  return `#${raw}`;
 }
 
 /** Parse a single JSON line from context.jsonl into an AwarenessEntry */
