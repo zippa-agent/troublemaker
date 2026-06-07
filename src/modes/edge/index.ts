@@ -71,4 +71,11 @@ export async function runEdgeWebChat(options: EdgeWebChatOptions): Promise<EdgeW
 	};
 }
 
+export type HostedEdgeTextOptions = EdgeWebChatOptions;
+export type HostedEdgeTextResult = EdgeWebChatResult;
+
+export async function runHostedEdgeTextTurn(options: HostedEdgeTextOptions): Promise<HostedEdgeTextResult> {
+	return runEdgeWebChat(options);
+}
+
 export type { AgentMessage as EdgeAgentMessage };
