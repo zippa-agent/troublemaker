@@ -1,49 +1,50 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
-	bashToolSchema,
-	DEFAULT_BASH_TIMEOUT_SECONDS,
-	type BashToolInput,
-} from "../../core/tool-definitions.js";
-import type { RuntimeEventSink } from "../../core/runtime-contract.js";
+	HOSTED_WORKSPACE_TOOL_NAMES,
+	hostedWorkspaceToolDescription,
+	hostedWorkspaceToolSchema,
+	normalizeHostedWorkspaceToolArgs,
+	type HostedWorkspaceToolName,
+} from "../../core/hosted-workspace-tools.js";
 import type { EdgeHostBridge } from "./host-bridge.js";
 
-export function createEdgeBashTool(
-	hostBridge: EdgeHostBridge,
-	emit?: RuntimeEventSink,
-): AgentTool<typeof bashToolSchema> {
-	return {
-		name: "bash",
-		label: "bash",
-		description: "Execute a bash command in the agent host container. In edge mode this wakes the host only when shell execution is required.",
-		parameters: bashToolSchema,
-		executionMode: "sequential",
-		execute: async (_toolCallId: string, input: BashToolInput, signal?: AbortSignal) => {
-			const result = await hostBridge.executeBash({
-				...input,
-				timeout: input.timeout ?? DEFAULT_BASH_TIMEOUT_SECONDS,
-			}, signal, (event) => {
-				return emit?.({
-					type: "toolResultDelta",
-					toolCallId: _toolCallId,
-					stream: event.stream,
-					text: event.text,
-					pid: event.pid,
-					sequence: event.sequence,
-					mode: "host",
-				});
-			});
+interface ToolResultContent {
+	type: string;
+	text?: string;
+}
 
-			let text = "";
-			if (result.stdout) text += result.stdout;
-			if (result.stderr) {
-				if (text) text += "\n";
-				text += result.stderr;
-			}
-			if (!text) text = "(no output)";
-			if (result.code !== 0) {
-				throw new Error(`${text}\n\nCommand exited with code ${result.code}`.trim());
-			}
-			return { content: [{ type: "text", text }], details: { code: result.code } };
+interface HostedToolResult {
+	content?: ToolResultContent[];
+	details?: unknown;
+}
+
+function normalizeToolResult(result: unknown): any {
+	if (result && typeof result === "object" && Array.isArray((result as HostedToolResult).content)) {
+		return result as HostedToolResult;
+	}
+	if (typeof result === "string") {
+		return { content: [{ type: "text", text: result }] };
+	}
+	return { content: [{ type: "text", text: JSON.stringify(result ?? null) }] };
+}
+
+function createEdgeHostedWorkspaceTool(name: HostedWorkspaceToolName, hostBridge: EdgeHostBridge): AgentTool<any> {
+	return {
+		name,
+		label: name,
+		description: hostedWorkspaceToolDescription(name),
+		parameters: hostedWorkspaceToolSchema(name),
+		executionMode: "sequential",
+		execute: async (_toolCallId: string, input: unknown, signal?: AbortSignal) => {
+			const args = normalizeHostedWorkspaceToolArgs(
+				name,
+				input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {},
+			);
+			return normalizeToolResult(await hostBridge.executeTool(name, args, signal));
 		},
 	};
+}
+
+export function createEdgeHostedWorkspaceTools(hostBridge: EdgeHostBridge): AgentTool<any>[] {
+	return HOSTED_WORKSPACE_TOOL_NAMES.map((name) => createEdgeHostedWorkspaceTool(name, hostBridge));
 }

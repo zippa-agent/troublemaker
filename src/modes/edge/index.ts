@@ -4,7 +4,7 @@ import type { RuntimeEventSink, WebTurnInput, WebTurnSettings } from "../../core
 import { normalizeThinkingLevelForModel } from "../../model-thinking.js";
 import type { EdgeHostBridge } from "./host-bridge.js";
 import { createEdgeAgentSession } from "./pi-session.js";
-import { createEdgeBashTool } from "./tools.js";
+import { createEdgeHostedWorkspaceTools } from "./tools.js";
 import {
 	createTroublemakerEdgeTurn,
 	type EdgeTroublemakerExtensionContext,
@@ -49,7 +49,7 @@ export async function runEdgeWebChat(options: EdgeWebChatOptions): Promise<EdgeW
 		thinkingLevel: normalizeThinkingLevelForModel(model, options.settings?.thinkingLevel),
 		sessionId: options.input.channelId,
 		initialMessages: options.history,
-		tools: [createEdgeBashTool(options.hostBridge, options.emit)],
+		tools: createEdgeHostedWorkspaceTools(options.hostBridge),
 		emit: options.emit,
 	});
 

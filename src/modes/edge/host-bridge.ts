@@ -1,15 +1,5 @@
-import type { BashToolInput, BashToolResult } from "../../core/tool-definitions.js";
-import type { RuntimeToolOutputStream } from "../../core/runtime-contract.js";
-
-export interface EdgeBashOutputEvent {
-	stream: RuntimeToolOutputStream;
-	text: string;
-	pid?: number;
-	sequence?: number;
-}
-
-export type EdgeBashOutputSink = (event: EdgeBashOutputEvent) => void | Promise<void>;
+import type { HostedWorkspaceToolName } from "../../core/hosted-workspace-tools.js";
 
 export interface EdgeHostBridge {
-	executeBash(input: BashToolInput, signal?: AbortSignal, onOutput?: EdgeBashOutputSink): Promise<BashToolResult>;
+	executeTool(tool: HostedWorkspaceToolName, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>;
 }
