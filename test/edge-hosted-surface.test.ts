@@ -23,13 +23,15 @@ const model = {
 
 const prompt = buildHostedWebSystemPrompt();
 assert.match(prompt, /Cloudflare Worker edge/);
-assert.match(prompt, /Available hosted workspace tools: `read`, `write`, `edit`, `bash`/);
+assert.match(prompt, /Available hosted tools: `read`, `write`, `edit`, `bash`, `list_channels`, `read_thread`, `send_message`/);
+assert.match(prompt, /send_message` only when a user-visible message should be delivered outside the current web chat/);
+assert.match(prompt, /slack:<channel>:<thread_ts>/);
 assert.match(prompt, /\/data\/awareness\/context\.jsonl/);
 assert.doesNotMatch(prompt, /\/workspace/);
-assert.doesNotMatch(prompt, /send_message|list_channels|read_thread|yield_no_action|attach/);
+assert.doesNotMatch(prompt, /yield_no_action|attach/);
 assert.equal(HOSTED_WORKSPACE_PATH, "/data");
-assert.deepEqual(HOSTED_WORKSPACE_TOOL_NAMES, ["read", "write", "edit", "bash"]);
-assert.deepEqual(hostedWorkspaceOpenAIToolDefinitions().map((tool) => tool.name), ["read", "write", "edit", "bash"]);
+assert.deepEqual(HOSTED_WORKSPACE_TOOL_NAMES, ["read", "write", "edit", "bash", "send_message", "list_channels", "read_thread"]);
+assert.deepEqual(hostedWorkspaceOpenAIToolDefinitions().map((tool) => tool.name), ["read", "write", "edit", "bash", "send_message", "list_channels", "read_thread"]);
 
 const turn = createTroublemakerEdgeTurn(
 	{ message: "read the scheduling skill", channelId: "web", source: "web" },
@@ -61,6 +63,18 @@ assert.deepEqual(
 assert.deepEqual(
 	normalizeHostedWorkspaceToolArgs("bash", { command: "pwd" }),
 	{ command: "pwd", timeout: 60, label: "Hosted bash" },
+);
+assert.deepEqual(
+	normalizeHostedWorkspaceToolArgs("send_message", { channel: "C123", message: "hello" }),
+	{ channel: "C123", message: "hello", target: "C123", text: "hello", label: "Hosted send_message" },
+);
+assert.deepEqual(
+	normalizeHostedWorkspaceToolArgs("list_channels", {}),
+	{},
+);
+assert.deepEqual(
+	normalizeHostedWorkspaceToolArgs("read_thread", { thread: "slack:C123:1779777014.658729" }),
+	{ thread: "slack:C123:1779777014.658729", target: "slack:C123:1779777014.658729" },
 );
 
 console.log("edge hosted surface ok");

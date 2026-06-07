@@ -342,7 +342,7 @@ When mentioning users, use <@username> format (e.g., <@mario>).`;
 			date: new Date().toISOString(),
 			ts,
 			threadTs,
-			channel: ch ? `slack:#${ch.name}` : `slack:${channel}`,
+			channel: slackChannelLogLabel(channel, ch?.name),
 			channelId: channel,
 			user: "bot",
 			text,
@@ -398,7 +398,7 @@ When mentioning users, use <@username> format (e.g., <@mario>).`;
 				user,
 				channels: this.getAllChannels(),
 				users: this.getAllUsers(),
-				channelName: this.channels.get(event.channel)?.name,
+				channelName: slackChannelLogLabel(event.channel, this.channels.get(event.channel)?.name),
 				isEvent,
 				verbose: new MomSettingsManager(this.workingDir).getVerbose(event.channel, "slack"),
 			},
@@ -450,7 +450,7 @@ When mentioning users, use <@username> format (e.g., <@mario>).`;
 		this.logToFile({
 			date: new Date(parseFloat(event.ts) * 1000).toISOString(),
 			ts: event.ts,
-			channel: ch ? `slack:#${ch.name}` : `slack:${event.channel}`,
+			channel: slackChannelLogLabel(event.channel, ch?.name),
 			channelId: event.channel,
 			user: event.user,
 			userName: user?.userName,
@@ -546,7 +546,7 @@ When mentioning users, use <@username> format (e.g., <@mario>).`;
 			this.logToFile({
 				date: new Date(parseFloat(msg.ts!) * 1000).toISOString(),
 				ts: msg.ts!,
-				channel: ch ? `slack:#${ch.name}` : `slack:${channelId}`,
+				channel: slackChannelLogLabel(channelId, ch?.name),
 				channelId,
 				user: isMomMessage ? "bot" : msg.user!,
 				userName: isMomMessage ? undefined : user?.userName,
@@ -652,6 +652,15 @@ function slackTimestampToIso(ts: string): string {
 	const epochMs = Number(seconds) * 1000 + Math.floor(Number(`0.${fractional}`) * 1000);
 	if (!Number.isFinite(epochMs)) return "";
 	return new Date(epochMs).toISOString();
+}
+
+export function slackChannelLogLabel(channelId: string, channelName?: string): string {
+	const name = channelName?.trim();
+	if (!name) return `slack:${channelId}`;
+	if (name.startsWith("slack:")) return name;
+	if (name.startsWith("DM:")) return `slack:${name}`;
+	if (name.startsWith("#")) return `slack:${name}`;
+	return `slack:#${name}`;
 }
 
 interface SlackHistoryMessage {
