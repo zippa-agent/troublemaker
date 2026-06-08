@@ -1,7 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ChannelInfo, UserInfo } from "../../adapters/types.js";
-import { buildHostedWebSystemPrompt, HOSTED_WORKSPACE_PATH } from "../../core/hosted-workspace-tools.js";
+import { buildHostedWebSystemPrompt, HOSTED_WORKSPACE_PATH, type HostedWorkspaceToolName } from "../../core/hosted-workspace-tools.js";
 import { buildSessionPreamble, type Skill } from "../../core/prompt.js";
 import type { WebTurnInput, WebTurnSettings } from "../../core/runtime-contract.js";
 
@@ -14,6 +14,7 @@ export interface EdgeTroublemakerExtensionContext {
 	users?: UserInfo[];
 	skills?: Skill[];
 	channelName?: string;
+	hostToolNames?: readonly HostedWorkspaceToolName[];
 	verbosity?: EdgeVerbosityLevel;
 }
 
@@ -54,7 +55,7 @@ export function createTroublemakerEdgeTurn(
 	const text = `${sessionPreamble}\n\n[${formatTimestamp(now)}] [${channelName}] [${userName}]: ${input.message}`;
 
 	return {
-		systemPrompt: settings?.systemPrompt || buildHostedWebSystemPrompt({ workspacePath }),
+		systemPrompt: settings?.systemPrompt || buildHostedWebSystemPrompt({ workspacePath, availableTools: context.hostToolNames }),
 		promptMessage: {
 			role: "user",
 			content: [{ type: "text", text }],

@@ -1,6 +1,7 @@
 import { getModel, type Api, type Model } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { RuntimeEventSink, WebTurnInput, WebTurnSettings } from "../../core/runtime-contract.js";
+import type { HostedWorkspaceToolName } from "../../core/hosted-workspace-tools.js";
 import { normalizeThinkingLevelForModel } from "../../model-thinking.js";
 import type { EdgeHostBridge } from "./host-bridge.js";
 import { createEdgeAgentSession } from "./pi-session.js";
@@ -18,6 +19,7 @@ export interface EdgeWebChatOptions extends EdgeTroublemakerExtensionContext {
 	modelApiKey: string;
 	modelBaseUrl?: string;
 	hostBridge: EdgeHostBridge;
+	hostToolNames?: readonly HostedWorkspaceToolName[];
 	emit: RuntimeEventSink;
 }
 
@@ -49,7 +51,7 @@ export async function runEdgeWebChat(options: EdgeWebChatOptions): Promise<EdgeW
 		thinkingLevel: normalizeThinkingLevelForModel(model, options.settings?.thinkingLevel),
 		sessionId: options.input.channelId,
 		initialMessages: options.history,
-		tools: createEdgeHostedWorkspaceTools(options.hostBridge),
+		tools: createEdgeHostedWorkspaceTools(options.hostBridge, { toolNames: options.hostToolNames }),
 		emit: options.emit,
 	});
 

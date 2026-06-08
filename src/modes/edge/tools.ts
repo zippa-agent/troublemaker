@@ -45,6 +45,14 @@ function createEdgeHostedWorkspaceTool(name: HostedWorkspaceToolName, hostBridge
 	};
 }
 
-export function createEdgeHostedWorkspaceTools(hostBridge: EdgeHostBridge): AgentTool<any>[] {
-	return HOSTED_WORKSPACE_TOOL_NAMES.map((name) => createEdgeHostedWorkspaceTool(name, hostBridge));
+export interface CreateEdgeHostedWorkspaceToolsOptions {
+	toolNames?: readonly HostedWorkspaceToolName[];
+}
+
+export function createEdgeHostedWorkspaceTools(
+	hostBridge: EdgeHostBridge,
+	options: CreateEdgeHostedWorkspaceToolsOptions = {},
+): AgentTool<any>[] {
+	const names = options.toolNames ?? HOSTED_WORKSPACE_TOOL_NAMES;
+	return names.map((name) => createEdgeHostedWorkspaceTool(name, hostBridge));
 }

@@ -193,10 +193,78 @@ export function normalizeHostedWorkspaceToolArgs(
 
 export interface HostedWebSystemPromptOptions {
 	workspacePath?: string;
+	availableTools?: readonly HostedWorkspaceToolName[];
+}
+
+function formatHostedToolNames(tools: readonly HostedWorkspaceToolName[]): string {
+	return tools.length ? tools.map((tool) => `\`${tool}\``).join(", ") : "none";
+}
+
+function hostedToolUsageGuidance(tools: readonly HostedWorkspaceToolName[], normalReply: string): string {
+	if (tools.length === 0) {
+		return "No hosted tools are available for this turn. Answer from the supplied context. If the user explicitly needs files, shell commands, thread inspection, cross-channel delivery, attachments, or long-lived work, say that the request needs container escalation.";
+	}
+
+	const guidance: string[] = [];
+	if (tools.includes("read")) guidance.push("use `read` before editing unknown files");
+	if (tools.includes("edit")) guidance.push("use `edit` for exact replacements");
+	if (tools.includes("write")) guidance.push("use `write` for complete file writes");
+	if (tools.includes("bash")) guidance.push("use `bash` only for bounded inspection, tests, builds, and verification");
+	if (tools.includes("list_channels")) guidance.push("use `list_channels` to discover explicit delivery targets");
+	if (tools.includes("read_thread")) guidance.push("use `read_thread` to inspect Slack threads");
+	if (tools.includes("send_message")) guidance.push(`use \`send_message\` only for explicit cross-channel delivery, not for ${normalReply}`);
+	return guidance.join(", ") + ".";
+}
+
+function hostedRuntimePolicyBlock(
+	workspacePath: string,
+	tools: readonly HostedWorkspaceToolName[],
+	normalReply: string,
+): string {
+	const toolNames = formatHostedToolNames(tools);
+	if (tools.length === 0) {
+		return `## Runtime
+- The primary turn runs entirely in the Worker. No host/container tools are exposed for this turn.
+- Ordinary assistant text is delivered as ${normalReply}.
+- If a request requires workspace I/O, shell execution, platform channel lookup, Slack thread reads, explicit cross-channel delivery, attachments, shared-file ingestion, long-lived daemons, or unavailable host capabilities, explain that the request needs container escalation instead of guessing.
+
+## Workspace
+${workspacePath}/
+├── awareness/context.jsonl    # Shared conversation context
+├── awareness/scratch/         # Working notes
+├── MEMORY.md                  # Persistent memory
+├── BRIEF.md                   # Current operator-assigned brief, if present
+├── settings.json              # Model and hosted runtime preferences
+└── skills/                    # Custom skills with SKILL.md files
+
+## Tools
+Available hosted tools: none.
+${hostedToolUsageGuidance(tools, normalReply)}`;
+	}
+
+	return `## Runtime
+- The primary turn runs in the Worker. The container may wake only if you call one of the explicitly exposed host tools for this turn: ${toolNames}.
+- The persistent workspace root is ${workspacePath}. Hosted tools run from that workspace and accept either relative paths or absolute paths under ${workspacePath}.
+- Ordinary assistant text is delivered as ${normalReply}.
+- If a request requires a host capability that is not exposed in this turn, explain that the request needs container escalation instead of guessing.
+
+## Workspace
+${workspacePath}/
+├── awareness/context.jsonl    # Shared conversation context
+├── awareness/scratch/         # Working notes
+├── MEMORY.md                  # Persistent memory
+├── BRIEF.md                   # Current operator-assigned brief, if present
+├── settings.json              # Model and hosted runtime preferences
+└── skills/                    # Custom skills with SKILL.md files
+
+## Tools
+Available hosted tools: ${toolNames}.
+${hostedToolUsageGuidance(tools, normalReply)}`;
 }
 
 export function buildHostedWebSystemPrompt(options: HostedWebSystemPromptOptions = {}): string {
 	const workspacePath = options.workspacePath || HOSTED_WORKSPACE_PATH;
+	const tools = options.availableTools ?? HOSTED_WORKSPACE_TOOL_NAMES;
 	return `## Context
 - You are handling a TinyFat hosted web chat turn on the Cloudflare Worker edge.
 - Each user message includes a <session_context> block with current memory, skills, and the channel being attended. Always use the latest one.
@@ -207,31 +275,13 @@ You are responding via web chat. Use standard Markdown formatting.
 Bold: **text**, Italic: *text*, Code: \`code\`, Block: \`\`\`code\`\`\`, Links: [text](url)
 Keep responses concise and helpful.
 
-## Runtime
-- The primary turn runs in the Worker. Hosted tools may wake the container only when workspace I/O, shell execution, platform channel lookup, Slack thread reads, or outbound platform delivery is required.
-- The persistent workspace root is ${workspacePath}. Hosted tools run from that workspace and accept either relative paths or absolute paths under ${workspacePath}.
-- Ordinary assistant text is delivered directly to the web chat user.
-- For explicit cross-channel delivery, use \`list_channels\` to discover targets, \`read_thread\` to inspect Slack threads, and \`send_message\` to deliver to Slack, Telegram, Discord, Email, or SMS/iMessage.
-- For Slack thread replies, use the exact \`slack:<channel>:<thread_ts>\` target from \`list_channels\`; do not collapse distinct threads.
-- If a request requires shared-file ingestion, long-lived daemons, or unavailable host capabilities, explain that this edge web turn needs the container/platform runtime for that part.
-
-## Workspace
-${workspacePath}/
-├── awareness/context.jsonl    # Shared conversation context
-├── awareness/scratch/         # Working notes
-├── MEMORY.md                  # Persistent memory
-├── BRIEF.md                   # Current operator-assigned brief, if present
-├── settings.json              # Model and hosted runtime preferences
-└── skills/                    # Custom skills with SKILL.md files
-
-## Tools
-Available hosted tools: \`read\`, \`write\`, \`edit\`, \`bash\`, \`list_channels\`, \`read_thread\`, \`send_message\`.
-Use \`read\` before editing unknown files, \`edit\` for exact replacements, \`write\` for complete file writes, \`bash\` for bounded inspection, tests, builds, and verification, and \`send_message\` only when a user-visible message should be delivered outside the current web chat.`;
+${hostedRuntimePolicyBlock(workspacePath, tools, "the normal web chat reply")}`;
 }
 
 
 export function buildHostedEmailSystemPrompt(options: HostedWebSystemPromptOptions = {}): string {
 	const workspacePath = options.workspacePath || HOSTED_WORKSPACE_PATH;
+	const tools = options.availableTools ?? HOSTED_WORKSPACE_TOOL_NAMES;
 	return `## Context
 - You are handling a TinyFat hosted email turn on the Cloudflare Worker edge.
 - Each user message includes a <session_context> block with current memory, skills, and the email thread being attended. Always use the latest one.
@@ -242,24 +292,5 @@ You are replying by email. Use standard Markdown formatting.
 Bold: **text**, Italic: *text*, Code: \`code\`, Block: \`\`\`code\`\`\`, Links: [text](url)
 Keep responses concise, complete, and professional. The user will receive one final email with your response.
 
-## Runtime
-- The primary turn runs in the Worker. Hosted tools may wake the container only when workspace I/O, shell execution, platform channel lookup, Slack thread reads, or explicit cross-channel delivery is required.
-- The persistent workspace root is ${workspacePath}. Hosted tools run from that workspace and accept either relative paths or absolute paths under ${workspacePath}.
-- Ordinary assistant text is delivered as the final reply to the current email thread after the turn completes.
-- Do not call \`send_message\` for the normal reply to the current email thread; that reply is sent automatically after the turn completes.
-- For explicit cross-channel delivery, use \`list_channels\` to discover targets, \`read_thread\` to inspect Slack threads, and \`send_message\` to deliver to Slack, Telegram, Discord, another email target, or SMS/iMessage.
-- If a request requires inbound attachment ingestion, shared-file ingestion, long-lived daemons, or unavailable host capabilities, explain that this email needs the container/platform runtime for that part.
-
-## Workspace
-${workspacePath}/
-├── awareness/context.jsonl    # Shared conversation context
-├── awareness/scratch/         # Working notes
-├── MEMORY.md                  # Persistent memory
-├── BRIEF.md                   # Current operator-assigned brief, if present
-├── settings.json              # Model and hosted runtime preferences
-└── skills/                    # Custom skills with SKILL.md files
-
-## Tools
-Available hosted tools: \`read\`, \`write\`, \`edit\`, \`bash\`, \`list_channels\`, \`read_thread\`, \`send_message\`.
-Use \`read\` before editing unknown files, \`edit\` for exact replacements, \`write\` for complete file writes, \`bash\` for bounded inspection, tests, builds, and verification, and \`send_message\` only for explicit cross-channel delivery rather than the normal email reply.`;
+${hostedRuntimePolicyBlock(workspacePath, tools, "the normal email reply")}`;
 }
