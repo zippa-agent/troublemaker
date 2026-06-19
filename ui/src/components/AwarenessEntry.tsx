@@ -85,6 +85,24 @@ function OperatorControlEntry({ event, timestamp }: { event: OperatorControlEven
   );
 }
 
+function DiagnosticEntry({ entry, showChannels = true }: { entry: AwarenessEntryType; showChannels?: boolean }) {
+  const text = entry.strippedText || extractText(entry.content || []);
+  return (
+    <div className={`awareness-entry diagnostic-entry ${entry.diagnosticLevel || 'info'}`}>
+      <div className="diagnostic-header">
+        {entry.timestamp && <span className="entry-timestamp">{formatTime(entry.timestamp)}</span>}
+        {showChannels && entry.channel && <ChannelBadge channel={entry.channel} />}
+        <span className="diagnostic-level">{entry.diagnosticLevel || 'info'}</span>
+        <span className="diagnostic-title">{entry.diagnosticTitle || 'Runtime diagnostic'}</span>
+      </div>
+      {entry.diagnosticModel && <div className="diagnostic-model">{entry.diagnosticModel}</div>}
+      {text && <div className="diagnostic-message">{text}</div>}
+      {entry.diagnosticAction && <div className="diagnostic-action">{entry.diagnosticAction}</div>}
+      {entry.diagnosticDetail && <div className="diagnostic-detail">{entry.diagnosticDetail}</div>}
+    </div>
+  );
+}
+
 function getOperatorEventLabel(event: OperatorControlEvent): string {
   if (event.kind === 'configured') return 'settings updated';
   if (event.kind === 'assigned') return 'brief assigned';
@@ -508,6 +526,10 @@ function ToolResultBlock({ content, isError, onExpandingContent }: {
 export const AwarenessEntryComponent = memo(function AwarenessEntryComponent({ entry, onExpandingContent, showChannels = true }: AwarenessEntryProps) {
   if (entry.type === 'session') return null;
   if (!entry.content || !Array.isArray(entry.content)) return null;
+
+  if (entry.isDiagnostic) {
+    return <DiagnosticEntry entry={entry} showChannels={showChannels} />;
+  }
 
   // Orphan tool results are rare after stream normalization, but keep a
   // fallback so unmatched output is never silently dropped.

@@ -32,6 +32,7 @@ import { FilesystemWorkspaceStore } from "./storage/node/filesystem-workspace.js
 import { LiveAssistantSnapshot } from "./streaming/live-turn-snapshot.js";
 import type { ChannelStore } from "./store.js";
 import { sanitizeMessages } from "./sanitize.js";
+import { appendRunDiagnostic, buildMissingModelAuthDiagnostic, isMissingModelAuthError } from "./run-diagnostics.js";
 import { createMomTools, setUploadFunction } from "./tools/index.js";
 import { createSearchToolsTool, type ToolSearchRegistry } from "./tools/search-tools.js";
 import { withToolOutputStream } from "./tools/tool-output-stream.js";
@@ -1044,10 +1045,29 @@ function createRunner(
 			if (runState.stopReason === "error" && runState.errorMessage) {
 				try {
 					const visibleError = formatUserVisibleError(runState.errorMessage);
-					const userErrorMsg = `_Sorry, something went wrong: ${visibleError}_`;
-					ctx.emitContentBlock?.({ type: "error", message: visibleError });
-					await ctx.sendFinalResponse(userErrorMsg, { force: true });
-					await ctx.respondInThread(`_Error: ${visibleError}_`);
+					if (isMissingModelAuthError(visibleError)) {
+						const diagnostic = buildMissingModelAuthDiagnostic({
+							provider: currentModel.provider,
+							modelId: currentModel.id,
+							errorMessage: visibleError,
+							channel: ctx.channelName || ctx.message.channel,
+							source: ctx.message.sourceEventType || ctx.message.eventType || ctx.message.channel,
+						});
+						appendRunDiagnostic(awarenessDir, {
+							...diagnostic,
+							parentId: sm.getLeafId(),
+						});
+						ctx.emitContentBlock?.({
+							type: "error",
+							message: `${diagnostic.title}: ${diagnostic.message} ${diagnostic.action || ""}`.trim(),
+						});
+						log.logWarning("Model authentication diagnostic appended", `${diagnostic.model || currentModel.id}: ${visibleError}`);
+					} else {
+						const userErrorMsg = `_Sorry, something went wrong: ${visibleError}_`;
+						ctx.emitContentBlock?.({ type: "error", message: visibleError });
+						await ctx.sendFinalResponse(userErrorMsg, { force: true });
+						await ctx.respondInThread(`_Error: ${visibleError}_`);
+					}
 				} catch (err) {
 					const errMsg = err instanceof Error ? err.message : String(err);
 					log.logWarning("Failed to post error message", errMsg);

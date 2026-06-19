@@ -6,6 +6,8 @@ import * as log from "../log.js";
 import type { ChannelStore } from "../store.js";
 import type { ChannelInfo, MomContext, MomEvent, MomHandler, PlatformAdapter, UserInfo } from "./types.js";
 
+const MAX_FORM_WEBHOOK_BODY_BYTES = 256 * 1024;
+
 type FieldValue = string | string[];
 
 export interface FormInboundPayload {
@@ -59,6 +61,7 @@ You are handling a website contact-form submission. Treat it as a lead or custom
 	private handler!: MomHandler;
 	private channels = new Map<string, FormChannelRecord>();
 	private users = new Map<string, UserInfo>();
+	private processedSubmissions = new Set<string>();
 
 	constructor(config: FormWebhookAdapterConfig) {
 		this.workingDir = config.workingDir;
@@ -80,8 +83,22 @@ You are handling a website contact-form submission. Treat it as a lead or custom
 
 	dispatch(req: IncomingMessage, res: ServerResponse): void {
 		const chunks: Buffer[] = [];
-		req.on("data", (chunk: Buffer) => chunks.push(chunk));
+		let bodyBytes = 0;
+		let rejected = false;
+		req.on("data", (chunk: Buffer) => {
+			if (rejected) return;
+			bodyBytes += chunk.length;
+			if (bodyBytes > MAX_FORM_WEBHOOK_BODY_BYTES) {
+				rejected = true;
+				res.writeHead(413);
+				res.end("Payload too large");
+				req.destroy();
+				return;
+			}
+			chunks.push(chunk);
+		});
 		req.on("end", async () => {
+			if (rejected) return;
 			const body = Buffer.concat(chunks).toString("utf-8");
 			let payload: FormInboundPayload;
 			try {
@@ -95,7 +112,7 @@ You are handling a website contact-form submission. Treat it as a lead or custom
 			const missing = validatePayload(payload);
 			if (missing) {
 				res.writeHead(400);
-				res.end(`Missing required field: ${missing}`);
+				res.end(`Invalid or missing field: ${missing}`);
 				return;
 			}
 
@@ -111,6 +128,13 @@ You are handling a website contact-form submission. Treat it as a lead or custom
 	}
 
 	private async processInbound(payload: FormInboundPayload): Promise<void> {
+		const submissionKey = `${payload.site.id}:${payload.submissionId}`;
+		if (this.processedSubmissions.has(submissionKey)) {
+			log.logInfo(`[form] duplicate submission ignored site=${payload.site.slug} submission=${payload.submissionId}`);
+			return;
+		}
+		this.processedSubmissions.add(submissionKey);
+
 		const record = this.upsertChannel(payload);
 		const ts = payload.submittedAt || new Date().toISOString();
 		const userId = visitorIdentity(payload);
@@ -304,13 +328,47 @@ You are handling a website contact-form submission. Treat it as a lead or custom
 }
 
 function validatePayload(payload: FormInboundPayload): string | null {
+	if (!payload || typeof payload !== "object" || Array.isArray(payload)) return "payload";
 	if (payload.source !== "website_form") return "source";
-	if (!payload.submissionId) return "submissionId";
-	if (!payload.site?.id) return "site.id";
-	if (!payload.site?.slug) return "site.slug";
-	if (!payload.site?.displayName) return "site.displayName";
-	if (!payload.fields || typeof payload.fields !== "object") return "fields";
+	if (!isNonEmptyString(payload.submissionId)) return "submissionId";
+	if (!isNonEmptyString(payload.submittedAt)) return "submittedAt";
+	if (!payload.site || typeof payload.site !== "object" || Array.isArray(payload.site)) return "site";
+	if (!isNonEmptyString(payload.site.id)) return "site.id";
+	if (!isNonEmptyString(payload.site.slug)) return "site.slug";
+	if (!isNonEmptyString(payload.site.displayName)) return "site.displayName";
+	if (!isFieldMap(payload.fields)) return "fields";
+	if (payload.fieldOrder !== undefined && !isStringArray(payload.fieldOrder)) return "fieldOrder";
+	if (payload.visitor !== undefined && !isOptionalStringRecord(payload.visitor, ["name", "email", "phone"])) return "visitor";
+	if (payload.form !== undefined && !isOptionalStringRecord(payload.form, ["id", "pageUrl"])) return "form";
 	return null;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+	return typeof value === "string" && value.trim().length > 0;
+}
+
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isFieldMap(value: unknown): value is Record<string, FieldValue> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	return Object.entries(value).every(([key, fieldValue]) => (
+		typeof key === "string"
+		&& (
+			typeof fieldValue === "string"
+			|| (Array.isArray(fieldValue) && fieldValue.every((item) => typeof item === "string"))
+		)
+	));
+}
+
+function isOptionalStringRecord(value: unknown, allowedKeys: string[]): value is Record<string, string | undefined> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const allowed = new Set(allowedKeys);
+	return Object.entries(value).every(([key, fieldValue]) => (
+		allowed.has(key)
+		&& (fieldValue === undefined || typeof fieldValue === "string" || fieldValue === null)
+	));
 }
 
 function visitorIdentity(payload: FormInboundPayload): string {
