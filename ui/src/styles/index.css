@@ -1678,6 +1678,76 @@ html, body, #root {
   color: var(--text-muted);
 }
 
+/* Runtime diagnostics — durable web-only alerts from the agent runner */
+.awareness-entry.diagnostic-entry {
+  --entry-color: var(--entry-system);
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+  padding: 0.55rem 0.65rem;
+  border-left: 2px solid var(--entry-color);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--entry-color) 8%, transparent);
+}
+
+.awareness-entry.diagnostic-entry.error {
+  --entry-color: var(--error);
+}
+
+.awareness-entry.diagnostic-entry.warning {
+  --entry-color: var(--warning);
+}
+
+.diagnostic-header {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.diagnostic-level {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--entry-color);
+}
+
+.diagnostic-title {
+  min-width: 0;
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.diagnostic-model,
+.diagnostic-detail,
+.diagnostic-action {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.diagnostic-model {
+  color: color-mix(in srgb, var(--entry-color) 78%, var(--text) 22%);
+}
+
+.diagnostic-message {
+  color: var(--text);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.diagnostic-action {
+  color: var(--text);
+}
+
+.diagnostic-detail {
+  color: var(--text-muted);
+}
+
 /* Operator control events — settings, briefs, and principal notes */
 .awareness-entry.operator-control-entry {
   --entry-color: var(--entry-system);

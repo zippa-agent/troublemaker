@@ -72,6 +72,14 @@ export interface AwarenessEntry {
   isAmbient?: boolean;
   /** True if this is a system action (/model, /compact, etc.) */
   isSystemAction?: boolean;
+  /** True if this is a runtime/platform diagnostic that should be shown in the web app only */
+  isDiagnostic?: boolean;
+  diagnosticLevel?: 'info' | 'warning' | 'error';
+  diagnosticCode?: string;
+  diagnosticTitle?: string;
+  diagnosticDetail?: string;
+  diagnosticAction?: string;
+  diagnosticModel?: string;
 }
 
 /** Parse the [timestamp] [channel] [user]: text prefix from user messages */
@@ -107,6 +115,37 @@ export function parseContextLine(line: string): AwarenessEntry | null {
         id: raw.id || `session-${raw.timestamp}`,
         type: 'session',
         timestamp: raw.timestamp,
+      };
+    }
+
+    if (raw.type === 'custom' && raw.customType === 'run_diagnostic') {
+      const data = isRecord(raw.data) ? raw.data : {};
+      const timestamp = typeof raw.timestamp === 'string'
+        ? raw.timestamp
+        : typeof data.timestamp === 'string'
+          ? data.timestamp
+          : '';
+      const message = typeof data.message === 'string' && data.message.trim()
+        ? data.message
+        : 'Runtime diagnostic';
+      const level = normalizeDiagnosticLevel(data.level);
+      return {
+        id: typeof raw.id === 'string' ? raw.id : `diagnostic-${timestamp}`,
+        type: 'message',
+        timestamp,
+        role: 'assistant',
+        content: [{ type: 'text', text: message }],
+        channel: typeof data.channel === 'string' ? data.channel : undefined,
+        userName: typeof data.source === 'string' ? data.source : 'system',
+        strippedText: message,
+        stopReason: level === 'error' ? 'error' : undefined,
+        isDiagnostic: true,
+        diagnosticLevel: level,
+        diagnosticCode: typeof data.code === 'string' ? data.code : undefined,
+        diagnosticTitle: typeof data.title === 'string' ? data.title : 'Runtime diagnostic',
+        diagnosticDetail: typeof data.detail === 'string' ? data.detail : undefined,
+        diagnosticAction: typeof data.action === 'string' ? data.action : undefined,
+        diagnosticModel: typeof data.model === 'string' ? data.model : undefined,
       };
     }
 
@@ -217,6 +256,10 @@ function normalizeToolOutputStream(value: unknown): ToolOutputContent['stream'] 
 
 function normalizeRealtimeOutputPhase(value: unknown): RealtimeOutputPhase | undefined {
   return value === 'commentary' || value === 'final_answer' ? value : undefined;
+}
+
+function normalizeDiagnosticLevel(value: unknown): 'info' | 'warning' | 'error' {
+  return value === 'warning' || value === 'error' ? value : 'info';
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

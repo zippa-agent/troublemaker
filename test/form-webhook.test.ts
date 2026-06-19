@@ -66,6 +66,9 @@ try {
 	await (adapter as unknown as {
 		processInbound(payload: FormInboundPayload): Promise<void>;
 	}).processInbound(payload);
+	await (adapter as unknown as {
+		processInbound(payload: FormInboundPayload): Promise<void>;
+	}).processInbound(payload);
 
 	assert.equal(handled.length, 1, "form submission starts a run");
 	assert.equal(steered.length, 0);
@@ -83,6 +86,7 @@ try {
 	const inboundLog = readFileSync(join(workingDir, "log.jsonl"), "utf-8");
 	assert.match(inboundLog, /"sourceEventType":"form_submission"/);
 	assert.match(inboundLog, /"submissionId":"sub_123"/);
+	assert.equal(inboundLog.match(/"submissionId":"sub_123"/g)?.length, 1, "duplicate submission is logged once");
 
 	const ctx = adapter.createContext(handled[0]!, {} as ChannelStore);
 	await ctx.respond("ordinary transcript that must not leak");
@@ -95,6 +99,32 @@ try {
 	await ctx.setWorking(false);
 	const afterForcedFinal = readFileSync(join(workingDir, "log.jsonl"), "utf-8");
 	assert(afterForcedFinal.includes("test failure"), "forced runtime errors are still logged");
+
+	const phoneOnlyPayload: FormInboundPayload = {
+		...payload,
+		submissionId: "sub_phone_only",
+		visitor: {
+			name: "Pat Phone",
+			phone: "555-0100",
+		},
+		fields: {
+			name: "Pat Phone",
+			phone: "555-0100",
+			message: "Please call me back.",
+		},
+		fieldOrder: ["name", "phone", "message"],
+		text: undefined,
+	};
+
+	await (adapter as unknown as {
+		processInbound(payload: FormInboundPayload): Promise<void>;
+	}).processInbound(phoneOnlyPayload);
+
+	assert.equal(handled.length, 2, "missing-email form still starts a run");
+	assert.equal(handled[1]!.user, "555-0100", "visitor identity falls back to phone when email is absent");
+	assert.match(handled[1]!.text, /Please call me back/);
+	const phoneChannel = adapter.getChannel(handled[1]!.channel);
+	assert.equal(phoneChannel?.name, "acme-roofing/Pat Phone");
 
 	console.log("form-webhook happy path ok");
 } finally {
